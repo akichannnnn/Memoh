@@ -41,12 +41,9 @@
             :class="{ 'bg-accent': selectedType === item.meta.type }"
             @click="selectedType = item.meta.type as string"
           >
-            <div
-              class="flex size-8 shrink-0 items-center justify-center rounded-md text-xs font-bold uppercase"
-              :class="channelBadgeClass(item.meta.type as string)"
-            >
-              {{ channelIcon(item.meta.type) }}
-            </div>
+            <span class="flex size-8 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+              <ChannelIcon :channel="item.meta.type as string" size="1.25em" />
+            </span>
             <div class="flex-1 text-left">
               <div class="font-medium">
                 {{ item.meta.display_name }}
@@ -103,12 +100,9 @@
               class="flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm hover:bg-accent transition-colors"
               @click="addChannel(item.meta.type)"
             >
-              <div
-                class="flex size-7 shrink-0 items-center justify-center rounded-md text-xs font-bold uppercase"
-                :class="channelBadgeClass(item.meta.type)"
-              >
-                {{ channelIcon(item.meta.type) }}
-              </div>
+              <span class="flex size-7 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+                <ChannelIcon :channel="item.meta.type" size="1em" />
+              </span>
               <span>{{ item.meta.display_name }}</span>
             </button>
           </PopoverContent>
@@ -148,6 +142,7 @@ import { useQuery } from '@pinia/colada'
 import { getChannels, getBotsByIdChannelByPlatform } from '@memoh/sdk'
 import type { HandlersChannelMeta, ChannelChannelConfig } from '@memoh/sdk'
 import ChannelSettingsPanel from './channel-settings-panel.vue'
+import ChannelIcon from '@/components/channel-icon/index.vue'
 
 export interface BotChannelItem {
   meta: HandlersChannelMeta
@@ -219,23 +214,4 @@ function addChannel(type: string) {
   selectedType.value = type
 }
 
-function channelIcon(type: string): string {
-  const icons: Record<string, string> = {
-    qq: 'QQ',
-    telegram: 'TG',
-    matrix: 'MX',
-    feishu: '飞',
-  }
-  return icons[type] ?? type.slice(0, 2).toUpperCase()
-}
-
-function channelBadgeClass(type: string): string {
-  const classes: Record<string, string> = {
-    qq: 'bg-sky-100 text-sky-700 dark:bg-sky-900 dark:text-sky-300',
-    telegram: 'bg-blue-100 text-blue-700 dark:bg-blue-900 dark:text-blue-300',
-    matrix: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900 dark:text-emerald-300',
-    feishu: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-900 dark:text-indigo-300',
-  }
-  return classes[type] ?? 'bg-secondary text-secondary-foreground'
-}
 </script>
