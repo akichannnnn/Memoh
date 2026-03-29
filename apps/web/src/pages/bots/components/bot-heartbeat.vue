@@ -211,23 +211,42 @@
         </p>
       </div>
 
-      <!-- Load more -->
+      <!-- Pagination -->
       <div
-        v-if="hasMore"
-        class="flex justify-center pt-2"
+        v-if="totalPages > 1"
+        class="flex items-center justify-between pt-2"
       >
-        <Button
-          variant="outline"
-          size="sm"
-          :disabled="isLoading"
-          @click="loadMore"
+        <span class="text-xs text-muted-foreground">
+          {{ paginationSummary }}
+        </span>
+        <Pagination
+          :total="totalCount"
+          :items-per-page="PAGE_SIZE"
+          :sibling-count="1"
+          :page="currentPage"
+          show-edges
+          @update:page="currentPage = $event"
         >
-          <Spinner
-            v-if="isLoading"
-            class="mr-2 size-4"
-          />
-          {{ $t('bots.heartbeat.loadMore') }}
-        </Button>
+          <PaginationContent v-slot="{ items }">
+            <PaginationFirst />
+            <PaginationPrevious />
+            <template
+              v-for="(item, index) in items"
+              :key="index"
+            >
+              <PaginationEllipsis
+                v-if="item.type === 'ellipsis'"
+                :index="index"
+              />
+              <PaginationItem
+                v-else
+                :value="item.value"
+              />
+            </template>
+            <PaginationNext />
+            <PaginationLast />
+          </PaginationContent>
+        </Pagination>
       </div>
     </template>
   </div>
@@ -240,6 +259,9 @@ import { useI18n } from 'vue-i18n'
 import { toast } from 'vue-sonner'
 import {
   Button, Badge, Spinner, NativeSelect, Label, Switch, Input, Separator,
+  Pagination, PaginationContent, PaginationEllipsis,
+  PaginationFirst, PaginationItem, PaginationLast,
+  PaginationNext, PaginationPrevious,
 } from '@memohai/ui'
 import ConfirmPopover from '@/components/confirm-popover/index.vue'
 import ModelSelect from './model-select.vue'
@@ -338,15 +360,30 @@ async function handleSaveSettings() {
 const isLoading = ref(false)
 const isClearing = ref(false)
 const logs = ref<HeartbeatLog[]>([])
+const totalCount = ref(0)
 const statusFilter = ref('')
 const expandedIds = ref(new Set<string>())
-const hasMore = ref(false)
+const currentPage = ref(1)
 
-const PAGE_SIZE = 50
+const PAGE_SIZE = 20
 
 const filteredLogs = computed(() => {
   if (!statusFilter.value) return logs.value
   return logs.value.filter(l => l.status === statusFilter.value)
+})
+
+const totalPages = computed(() => Math.ceil(totalCount.value / PAGE_SIZE))
+
+const paginationSummary = computed(() => {
+  const total = totalCount.value
+  if (total === 0) return ''
+  const start = (currentPage.value - 1) * PAGE_SIZE + 1
+  const end = Math.min(currentPage.value * PAGE_SIZE, total)
+  return `${start}-${end} / ${total}`
+})
+
+watch(currentPage, () => {
+  fetchLogs()
 })
 
 function statusVariant(status: string | undefined) {
@@ -383,22 +420,18 @@ function toggleExpand(id: string | undefined) {
   }
 }
 
-async function fetchLogs(before?: string) {
+async function fetchLogs() {
   if (!props.botId) return
   isLoading.value = true
   try {
+    const offset = (currentPage.value - 1) * PAGE_SIZE
     const { data } = await getBotsByBotIdHeartbeatLogs({
       path: { bot_id: props.botId },
-      query: { limit: PAGE_SIZE, ...(before ? { before } : {}) },
+      query: { limit: PAGE_SIZE, offset },
       throwOnError: true,
     })
-    const items = data?.items ?? []
-    if (!before) {
-      logs.value = items
-    } else {
-      logs.value.push(...items)
-    }
-    hasMore.value = items.length >= PAGE_SIZE
+    logs.value = data?.items ?? []
+    totalCount.value = data?.total_count ?? 0
   } catch (error) {
     toast.error(resolveApiErrorMessage(error, t('bots.heartbeat.loadFailed')))
   } finally {
@@ -406,14 +439,9 @@ async function fetchLogs(before?: string) {
   }
 }
 
-async function loadMore() {
-  if (logs.value.length === 0) return
-  const lastLog = logs.value[logs.value.length - 1]
-  await fetchLogs(lastLog?.started_at)
-}
-
 async function handleRefresh() {
   expandedIds.value.clear()
+  currentPage.value = 1
   await fetchLogs()
 }
 
@@ -425,6 +453,7 @@ async function handleClear() {
       throwOnError: true,
     })
     logs.value = []
+    totalCount.value = 0
     expandedIds.value.clear()
     toast.success(t('bots.heartbeat.clearSuccess'))
   } catch (error) {
