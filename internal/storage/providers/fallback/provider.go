@@ -10,6 +10,8 @@ import (
 	"github.com/memohai/memoh/internal/storage"
 )
 
+var _ storage.ContainerFileOpener = (*Provider)(nil)
+
 // Provider delegates to primary and falls back to secondary on write errors.
 type Provider struct {
 	primary   storage.Provider
@@ -78,4 +80,19 @@ func tryListPrefix(ctx context.Context, p storage.Provider, prefix string) ([]st
 		return lister.ListPrefix(ctx, prefix)
 	}
 	return nil, nil
+}
+
+// OpenContainerFile delegates to whichever inner provider implements
+// storage.ContainerFileOpener, trying the primary first.
+func (p *Provider) OpenContainerFile(ctx context.Context, botID, containerPath string) (io.ReadCloser, error) {
+	if opener, ok := p.primary.(storage.ContainerFileOpener); ok {
+		rc, err := opener.OpenContainerFile(ctx, botID, containerPath)
+		if err == nil {
+			return rc, nil
+		}
+	}
+	if opener, ok := p.secondary.(storage.ContainerFileOpener); ok {
+		return opener.OpenContainerFile(ctx, botID, containerPath)
+	}
+	return nil, storage.ErrContainerFileNotSupported
 }
