@@ -7387,10 +7387,44 @@ const docTemplate = `{
                     "200": {
                         "description": "OK",
                         "schema": {
-                            "type": "object",
-                            "additionalProperties": {
-                                "type": "string"
-                            }
+                            "$ref": "#/definitions/providers.OAuthAuthorizeResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Bad Request",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "$ref": "#/definitions/handlers.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
+        "/providers/{id}/oauth/poll": {
+            "post": {
+                "tags": [
+                    "providers-oauth"
+                ],
+                "summary": "Poll OAuth device authorization for an LLM provider",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Provider ID (UUID)",
+                        "name": "id",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/providers.OAuthStatus"
                         }
                     },
                     "400": {
@@ -9458,6 +9492,9 @@ const docTemplate = `{
         "bots.CreateBotRequest": {
             "type": "object",
             "properties": {
+                "acl_preset": {
+                    "type": "string"
+                },
                 "avatar_url": {
                     "type": "string"
                 },
@@ -9729,7 +9766,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "channel_type": {
-                    "type": "string"
+                    "$ref": "#/definitions/channel.ChannelType"
                 },
                 "created_at": {
                     "type": "string"
@@ -9770,7 +9807,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "channel_type": {
-                    "type": "string"
+                    "$ref": "#/definitions/channel.ChannelType"
                 },
                 "config": {
                     "type": "object",
@@ -9786,6 +9823,33 @@ const docTemplate = `{
                     "type": "string"
                 }
             }
+        },
+        "channel.ChannelType": {
+            "type": "string",
+            "enum": [
+                "telegram",
+                "feishu",
+                "dingtalk",
+                "matrix",
+                "discord",
+                "qq",
+                "wecom",
+                "weixin",
+                "wechatoa",
+                "local"
+            ],
+            "x-enum-varnames": [
+                "ChannelTypeTelegram",
+                "ChannelTypeFeishu",
+                "ChannelTypeDingtalk",
+                "ChannelTypeMatrix",
+                "ChannelTypeDiscord",
+                "ChannelTypeQQ",
+                "ChannelTypeWecom",
+                "ChannelTypeWeixin",
+                "ChannelTypeWeChatOA",
+                "ChannelTypeLocal"
+            ]
         },
         "channel.ConfigSchema": {
             "type": "object",
@@ -9814,6 +9878,9 @@ const docTemplate = `{
                     }
                 },
                 "example": {},
+                "order": {
+                    "type": "integer"
+                },
                 "required": {
                     "type": "boolean"
                 },
@@ -10473,6 +10540,17 @@ const docTemplate = `{
                 }
             }
         },
+        "handlers.ContainerGPURequest": {
+            "type": "object",
+            "properties": {
+                "devices": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
         "handlers.ContextUsage": {
             "type": "object",
             "properties": {
@@ -10487,6 +10565,9 @@ const docTemplate = `{
         "handlers.CreateContainerRequest": {
             "type": "object",
             "properties": {
+                "gpu": {
+                    "$ref": "#/definitions/handlers.ContainerGPURequest"
+                },
                 "image": {
                     "type": "string"
                 },
@@ -10501,6 +10582,12 @@ const docTemplate = `{
         "handlers.CreateContainerResponse": {
             "type": "object",
             "properties": {
+                "cdi_devices": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "container_id": {
                     "type": "string"
                 },
@@ -10692,6 +10779,12 @@ const docTemplate = `{
         "handlers.GetContainerResponse": {
             "type": "object",
             "properties": {
+                "cdi_devices": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
                 "container_id": {
                     "type": "string"
                 },
@@ -12100,14 +12193,77 @@ const docTemplate = `{
                 }
             }
         },
+        "providers.OAuthAccount": {
+            "type": "object",
+            "properties": {
+                "avatar_url": {
+                    "type": "string"
+                },
+                "email": {
+                    "type": "string"
+                },
+                "label": {
+                    "type": "string"
+                },
+                "login": {
+                    "type": "string"
+                },
+                "name": {
+                    "type": "string"
+                },
+                "profile_url": {
+                    "type": "string"
+                }
+            }
+        },
+        "providers.OAuthAuthorizeResponse": {
+            "type": "object",
+            "properties": {
+                "auth_url": {
+                    "type": "string"
+                },
+                "device": {
+                    "$ref": "#/definitions/providers.OAuthDeviceStatus"
+                },
+                "mode": {
+                    "type": "string"
+                }
+            }
+        },
+        "providers.OAuthDeviceStatus": {
+            "type": "object",
+            "properties": {
+                "expires_at": {
+                    "type": "string"
+                },
+                "interval_seconds": {
+                    "type": "integer"
+                },
+                "pending": {
+                    "type": "boolean"
+                },
+                "user_code": {
+                    "type": "string"
+                },
+                "verification_uri": {
+                    "type": "string"
+                }
+            }
+        },
         "providers.OAuthStatus": {
             "type": "object",
             "properties": {
+                "account": {
+                    "$ref": "#/definitions/providers.OAuthAccount"
+                },
                 "callback_url": {
                     "type": "string"
                 },
                 "configured": {
                     "type": "boolean"
+                },
+                "device": {
+                    "$ref": "#/definitions/providers.OAuthDeviceStatus"
                 },
                 "expired": {
                     "type": "boolean"
@@ -12117,6 +12273,9 @@ const docTemplate = `{
                 },
                 "has_token": {
                     "type": "boolean"
+                },
+                "mode": {
+                    "type": "string"
                 }
             }
         },
@@ -12519,6 +12678,9 @@ const docTemplate = `{
                 "compaction_threshold": {
                     "type": "integer"
                 },
+                "context_token_budget": {
+                    "type": "integer"
+                },
                 "discuss_probe_model_id": {
                     "type": "string"
                 },
@@ -12540,6 +12702,9 @@ const docTemplate = `{
                 "memory_provider_id": {
                     "type": "string"
                 },
+                "persist_full_tool_results": {
+                    "type": "boolean"
+                },
                 "reasoning_effort": {
                     "type": "string"
                 },
@@ -12547,6 +12712,9 @@ const docTemplate = `{
                     "type": "boolean"
                 },
                 "search_provider_id": {
+                    "type": "string"
+                },
+                "timezone": {
                     "type": "string"
                 },
                 "title_model_id": {
@@ -12581,6 +12749,9 @@ const docTemplate = `{
                 "compaction_threshold": {
                     "type": "integer"
                 },
+                "context_token_budget": {
+                    "type": "integer"
+                },
                 "discuss_probe_model_id": {
                     "type": "string"
                 },
@@ -12602,6 +12773,9 @@ const docTemplate = `{
                 "memory_provider_id": {
                     "type": "string"
                 },
+                "persist_full_tool_results": {
+                    "type": "boolean"
+                },
                 "reasoning_effort": {
                     "type": "string"
                 },
@@ -12609,6 +12783,9 @@ const docTemplate = `{
                     "type": "boolean"
                 },
                 "search_provider_id": {
+                    "type": "string"
+                },
+                "timezone": {
                     "type": "string"
                 },
                 "title_model_id": {

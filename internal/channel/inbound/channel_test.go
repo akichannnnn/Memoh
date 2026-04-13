@@ -13,13 +13,18 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgtype"
+
 	"github.com/memohai/memoh/internal/acl"
 	"github.com/memohai/memoh/internal/channel"
 	"github.com/memohai/memoh/internal/channel/identities"
 	"github.com/memohai/memoh/internal/channel/route"
+	"github.com/memohai/memoh/internal/command"
 	"github.com/memohai/memoh/internal/conversation"
+	dbsqlc "github.com/memohai/memoh/internal/db/sqlc"
 	"github.com/memohai/memoh/internal/media"
 	messagepkg "github.com/memohai/memoh/internal/message"
+	pipelinepkg "github.com/memohai/memoh/internal/pipeline"
 	"github.com/memohai/memoh/internal/schedule"
 )
 
@@ -185,6 +190,71 @@ type fakeChatACL struct {
 	lastReq acl.EvaluateRequest
 }
 
+type fakeSessionEnsurer struct {
+	activeSession SessionResult
+	activeErr     error
+	lastRouteID   string
+}
+
+func (f *fakeSessionEnsurer) EnsureActiveSession(_ context.Context, _, routeID, _ string) (SessionResult, error) {
+	f.lastRouteID = routeID
+	if f.activeErr != nil {
+		return SessionResult{}, f.activeErr
+	}
+	return f.activeSession, nil
+}
+
+func (f *fakeSessionEnsurer) GetActiveSession(_ context.Context, routeID string) (SessionResult, error) {
+	f.lastRouteID = routeID
+	if f.activeErr != nil {
+		return SessionResult{}, f.activeErr
+	}
+	return f.activeSession, nil
+}
+
+func (f *fakeSessionEnsurer) CreateNewSession(_ context.Context, _, routeID, _, _ string) (SessionResult, error) {
+	f.lastRouteID = routeID
+	if f.activeErr != nil {
+		return SessionResult{}, f.activeErr
+	}
+	return f.activeSession, nil
+}
+
+type fakeCommandQueries struct {
+	messageCount int64
+	usage        int64
+	cacheRow     dbsqlc.GetSessionCacheStatsRow
+	skills       []string
+}
+
+func (*fakeCommandQueries) GetLatestSessionIDByBot(_ context.Context, _ pgtype.UUID) (pgtype.UUID, error) {
+	return pgtype.UUID{}, errors.New("unexpected latest session lookup")
+}
+
+func (f *fakeCommandQueries) CountMessagesBySession(_ context.Context, _ pgtype.UUID) (int64, error) {
+	return f.messageCount, nil
+}
+
+func (f *fakeCommandQueries) GetLatestAssistantUsage(_ context.Context, _ pgtype.UUID) (int64, error) {
+	return f.usage, nil
+}
+
+func (f *fakeCommandQueries) GetSessionCacheStats(_ context.Context, _ pgtype.UUID) (dbsqlc.GetSessionCacheStatsRow, error) {
+	return f.cacheRow, nil
+}
+
+func (f *fakeCommandQueries) GetSessionUsedSkills(_ context.Context, _ pgtype.UUID) ([]string, error) {
+	return f.skills, nil
+}
+
+func (*fakeCommandQueries) GetTokenUsageByDayAndType(_ context.Context, _ dbsqlc.GetTokenUsageByDayAndTypeParams) ([]dbsqlc.GetTokenUsageByDayAndTypeRow, error) {
+	return nil, nil
+}
+
+func (*fakeCommandQueries) GetTokenUsageByModel(_ context.Context, _ dbsqlc.GetTokenUsageByModelParams) ([]dbsqlc.GetTokenUsageByModelRow, error) {
+	return nil, nil
+}
+
 func (f *fakeChatACL) Evaluate(_ context.Context, req acl.EvaluateRequest) (bool, error) {
 	f.calls++
 	f.lastReq = req
@@ -203,6 +273,30 @@ type fakeMediaIngestor struct {
 	payloads        [][]byte
 	storageKeyAsset media.Asset
 	storageKeyErr   error
+}
+
+func (f *fakeMediaIngestor) Stat(_ context.Context, _, contentHash string) (media.Asset, error) {
+	asset := f.storageKeyAsset
+	if asset.ContentHash == "" {
+		asset = media.Asset{
+			ContentHash: contentHash,
+			Mime:        "application/octet-stream",
+			StorageKey:  "test/" + contentHash,
+		}
+	}
+	return asset, nil
+}
+
+func (f *fakeMediaIngestor) Open(_ context.Context, _, contentHash string) (io.ReadCloser, media.Asset, error) {
+	asset := f.storageKeyAsset
+	if asset.ContentHash == "" {
+		asset = media.Asset{
+			ContentHash: contentHash,
+			Mime:        "application/octet-stream",
+			StorageKey:  "test/" + contentHash,
+		}
+	}
+	return io.NopCloser(bytes.NewReader([]byte("test"))), asset, nil
 }
 
 func (f *fakeMediaIngestor) Ingest(_ context.Context, input media.IngestInput) (media.Asset, error) {
@@ -524,6 +618,72 @@ func TestChannelInboundProcessorIgnoreEmpty(t *testing.T) {
 	}
 }
 
+func TestChannelInboundProcessorStatusUsesRouteSession(t *testing.T) {
+	channelIdentitySvc := &fakeChannelIdentityService{channelIdentity: identities.ChannelIdentity{ID: "channelIdentity-status"}}
+	policySvc := &fakePolicyService{}
+	chatSvc := &fakeChatService{resolveResult: route.ResolveConversationResult{ChatID: "chat-status", RouteID: "route-status"}}
+	gateway := &fakeChatGateway{}
+	processor := NewChannelInboundProcessor(slog.Default(), nil, chatSvc, chatSvc, gateway, channelIdentitySvc, policySvc, nil, "", 0)
+	processor.SetSessionEnsurer(&fakeSessionEnsurer{
+		activeSession: SessionResult{ID: "11111111-1111-1111-1111-111111111111", Type: "chat"},
+	})
+	processor.SetCommandHandler(command.NewHandler(
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		&fakeCommandQueries{
+			messageCount: 9,
+			usage:        512,
+			cacheRow: dbsqlc.GetSessionCacheStatsRow{
+				CacheReadTokens:  64,
+				CacheWriteTokens: 32,
+				TotalInputTokens: 512,
+			},
+			skills: []string{"search"},
+		},
+		nil,
+		nil,
+		nil,
+	))
+	sender := &fakeReplySender{}
+
+	cfg := channel.ChannelConfig{ID: "cfg-1", BotID: "bot-1", ChannelType: channel.ChannelType("discord")}
+	msg := channel.InboundMessage{
+		BotID:       "bot-1",
+		Channel:     channel.ChannelType("discord"),
+		Message:     channel.Message{Text: "/status"},
+		ReplyTarget: "discord:status",
+		Sender:      channel.Identity{SubjectID: "user-1"},
+		Conversation: channel.Conversation{
+			ID:   "conv-status",
+			Type: channel.ConversationTypePrivate,
+		},
+	}
+
+	if err := processor.HandleInbound(context.Background(), cfg, msg, sender); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(sender.sent) != 1 {
+		t.Fatalf("expected one status reply, got %d", len(sender.sent))
+	}
+	if !strings.Contains(sender.sent[0].Message.Text, "- Scope: current conversation") {
+		t.Fatalf("expected current conversation scope, got %q", sender.sent[0].Message.Text)
+	}
+	if !strings.Contains(sender.sent[0].Message.Text, "- Session ID: 11111111-1111-1111-1111-111111111111") {
+		t.Fatalf("expected active route session in reply, got %q", sender.sent[0].Message.Text)
+	}
+}
+
 func TestBuildInboundQueryAttachmentOnlyReturnsEmpty(t *testing.T) {
 	t.Parallel()
 
@@ -533,7 +693,7 @@ func TestBuildInboundQueryAttachmentOnlyReturnsEmpty(t *testing.T) {
 			{Type: channel.AttachmentImage},
 		},
 	}
-	if got := buildInboundQuery(msg, nil); got != "" {
+	if got := strings.TrimSpace(msg.PlainText()); got != "" {
 		t.Fatalf("expected empty query for attachment-only message, got %q", got)
 	}
 }
@@ -723,6 +883,34 @@ func (s *failingOpenStreamSender) OpenStream(_ context.Context, _ string, _ chan
 	return nil, errors.New("open stream failed")
 }
 
+type failingCloseSender struct {
+	err error
+}
+
+func (*failingCloseSender) Send(_ context.Context, _ channel.OutboundMessage) error {
+	return nil
+}
+
+func (s *failingCloseSender) OpenStream(_ context.Context, target string, _ channel.StreamOptions) (channel.OutboundStream, error) {
+	return &failingCloseStream{target: strings.TrimSpace(target), err: s.err}, nil
+}
+
+type failingCloseStream struct {
+	target string
+	err    error
+}
+
+func (*failingCloseStream) Push(_ context.Context, _ channel.StreamEvent) error {
+	return nil
+}
+
+func (s *failingCloseStream) Close(_ context.Context) error {
+	if s != nil && s.err != nil {
+		return s.err
+	}
+	return errors.New("close stream failed")
+}
+
 func TestChannelInboundProcessorDoesNotPersistBeforeOpenStream(t *testing.T) {
 	channelIdentitySvc := &fakeChannelIdentityService{channelIdentity: identities.ChannelIdentity{ID: "channelIdentity-openstream"}}
 	policySvc := &fakePolicyService{}
@@ -753,6 +941,39 @@ func TestChannelInboundProcessorDoesNotPersistBeforeOpenStream(t *testing.T) {
 	}
 	if gateway.gotReq.Query != "" {
 		t.Fatalf("runner should not be called when stream open fails")
+	}
+}
+
+func TestChannelInboundProcessorReturnsCloseStreamError(t *testing.T) {
+	channelIdentitySvc := &fakeChannelIdentityService{channelIdentity: identities.ChannelIdentity{ID: "channelIdentity-closestream"}}
+	policySvc := &fakePolicyService{}
+	chatSvc := &fakeChatService{resolveResult: route.ResolveConversationResult{ChatID: "chat-closestream", RouteID: "route-closestream"}}
+	gateway := &fakeChatGateway{
+		resp: conversation.ChatResponse{
+			Messages: []conversation.ModelMessage{
+				{Role: "assistant", Content: conversation.NewTextContent("ok")},
+			},
+		},
+	}
+	processor := NewChannelInboundProcessor(slog.Default(), nil, chatSvc, chatSvc, gateway, channelIdentitySvc, policySvc, nil, "", 0)
+	sender := &failingCloseSender{err: errors.New("wechat send failed")}
+
+	cfg := channel.ChannelConfig{ID: "cfg-closestream", BotID: "bot-1", ChannelType: channel.ChannelType("wechatoa")}
+	msg := channel.InboundMessage{
+		BotID:       "bot-1",
+		Channel:     channel.ChannelType("wechatoa"),
+		Message:     channel.Message{ID: "msg-closestream-1", Text: "hello"},
+		ReplyTarget: "openid:user-openid",
+		Sender:      channel.Identity{SubjectID: "user-1"},
+		Conversation: channel.Conversation{
+			ID:   "conv-closestream",
+			Type: channel.ConversationTypePrivate,
+		},
+	}
+
+	err := processor.HandleInbound(context.Background(), cfg, msg, sender)
+	if err == nil || err.Error() != "wechat send failed" {
+		t.Fatalf("expected close stream error, got: %v", err)
 	}
 }
 
@@ -1000,6 +1221,82 @@ func TestChannelInboundProcessorIngestsQQFileAttachmentKeepsOriginalExtWhenMimeG
 	}
 	if strings.HasSuffix(storageKey, ".bin") {
 		t.Fatalf("expected storage key to avoid .bin fallback, got %q", storageKey)
+	}
+}
+
+func TestChannelInboundProcessorPipelineUsesResolvedAttachments(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		_, _ = w.Write([]byte("fake-telegram-photo"))
+	}))
+	defer server.Close()
+
+	channelIdentitySvc := &fakeChannelIdentityService{channelIdentity: identities.ChannelIdentity{ID: "channelIdentity-pipeline-asset"}}
+	policySvc := &fakePolicyService{}
+	chatSvc := &fakeChatService{resolveResult: route.ResolveConversationResult{ChatID: "chat-pipeline-asset", RouteID: "route-pipeline-asset"}}
+	gateway := &fakeChatGateway{
+		resp: conversation.ChatResponse{
+			Messages: []conversation.ModelMessage{
+				{Role: "assistant", Content: conversation.NewTextContent("ok")},
+			},
+		},
+	}
+	processor := NewChannelInboundProcessor(slog.Default(), nil, chatSvc, chatSvc, gateway, channelIdentitySvc, policySvc, nil, "", 0)
+	mediaSvc := &fakeMediaIngestor{nextID: "asset-pipeline-photo", nextMime: "image/jpeg"}
+	processor.SetMediaService(mediaSvc)
+	processor.SetSessionEnsurer(&fakeSessionEnsurer{activeSession: SessionResult{ID: "session-pipeline-asset", Type: "chat"}})
+	pipeline := pipelinepkg.NewPipeline(pipelinepkg.RenderParams{})
+	processor.SetPipeline(pipeline, nil, nil)
+	sender := &fakeReplySender{}
+
+	cfg := channel.ChannelConfig{ID: "cfg-pipeline-asset", BotID: "bot-1", ChannelType: channel.ChannelTypeTelegram}
+	msg := channel.InboundMessage{
+		BotID:   "bot-1",
+		Channel: channel.ChannelTypeTelegram,
+		Message: channel.Message{
+			ID:   "msg-pipeline-asset-1",
+			Text: "photo test",
+			Attachments: []channel.Attachment{
+				{
+					Type:        channel.AttachmentImage,
+					URL:         server.URL + "/file/bot123/photo.jpg",
+					PlatformKey: "tg-photo-1",
+					Name:        "photo.jpg",
+					Mime:        "image/jpeg",
+				},
+			},
+		},
+		ReplyTarget: "12345",
+		Sender:      channel.Identity{SubjectID: "telegram-user"},
+		Conversation: channel.Conversation{
+			ID:   "12345",
+			Type: channel.ConversationTypePrivate,
+		},
+	}
+
+	if err := processor.HandleInbound(context.Background(), cfg, msg, sender); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if mediaSvc.calls != 1 {
+		t.Fatalf("expected media ingest to be called once, got %d", mediaSvc.calls)
+	}
+
+	ic, ok := pipeline.GetIC("session-pipeline-asset")
+	if !ok {
+		t.Fatal("expected pipeline session to be created")
+	}
+	if len(ic.Nodes) == 0 || ic.Nodes[0].Message == nil {
+		t.Fatal("expected first pipeline node to be a message")
+	}
+	atts := ic.Nodes[0].Message.Attachments
+	if len(atts) != 1 {
+		t.Fatalf("expected one pipeline attachment, got %d", len(atts))
+	}
+	if got := atts[0].FilePath; got != "/data/media/test/asset-pipeline-photo" {
+		t.Fatalf("expected pipeline attachment path to use media store, got %q", got)
+	}
+	if strings.Contains(atts[0].FilePath, "api.telegram.org") {
+		t.Fatalf("expected pipeline attachment path to avoid telegram url, got %q", atts[0].FilePath)
 	}
 }
 
@@ -1525,7 +1822,7 @@ func TestIngestOutboundAttachments_DataURL(t *testing.T) {
 		{Type: channel.AttachmentImage, URL: "data:image/png;base64,iVBORw0KGgo=", Mime: "image/png"},
 	}
 	// Without media service, attachments pass through unchanged.
-	result := p.ingestOutboundAttachments(context.Background(), "bot-1", attachments)
+	result := p.ingestOutboundAttachments(context.Background(), "bot-1", channel.ChannelType("telegram"), attachments)
 	if len(result) != 1 {
 		t.Fatalf("expected 1 attachment, got %d", len(result))
 	}
@@ -1542,7 +1839,7 @@ func TestIngestOutboundAttachments_NonDataURL(t *testing.T) {
 		{Type: channel.AttachmentImage, URL: "https://example.com/img.png"},
 		{Type: channel.AttachmentImage, ContentHash: "existing-asset", URL: "/data/media/img.png"},
 	}
-	result := p.ingestOutboundAttachments(context.Background(), "bot-1", attachments)
+	result := p.ingestOutboundAttachments(context.Background(), "bot-1", channel.ChannelType("telegram"), attachments)
 	if len(result) != 2 {
 		t.Fatalf("expected 2 attachments, got %d", len(result))
 	}
@@ -1644,7 +1941,7 @@ func TestIngestOutboundAttachments_ContainerPath(t *testing.T) {
 	attachments := []channel.Attachment{
 		{Type: channel.AttachmentImage, URL: "/data/media/26da/26da0cc7.jpg"},
 	}
-	result := p.ingestOutboundAttachments(context.Background(), "bot-1", attachments)
+	result := p.ingestOutboundAttachments(context.Background(), "bot-1", channel.ChannelType("telegram"), attachments)
 	if len(result) != 1 {
 		t.Fatalf("expected 1 attachment, got %d", len(result))
 	}
@@ -1666,9 +1963,12 @@ func TestIngestOutboundAttachments_ContainerPathNotFound(t *testing.T) {
 	attachments := []channel.Attachment{
 		{Type: channel.AttachmentImage, URL: "/data/media/26da/missing.jpg"},
 	}
-	result := p.ingestOutboundAttachments(context.Background(), "bot-1", attachments)
+	result := p.ingestOutboundAttachments(context.Background(), "bot-1", channel.ChannelType("telegram"), attachments)
 	if len(result) != 1 {
-		t.Fatalf("expected 1 attachment, got %d", len(result))
+		t.Fatalf("expected unresolved container attachment to remain unchanged, got %d", len(result))
+	}
+	if result[0].URL != "/data/media/26da/missing.jpg" {
+		t.Fatalf("expected original path preserved, got %q", result[0].URL)
 	}
 	if result[0].ContentHash != "" {
 		t.Fatalf("expected empty content_hash for unresolved path, got %q", result[0].ContentHash)

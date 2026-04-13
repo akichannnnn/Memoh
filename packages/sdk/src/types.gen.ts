@@ -341,6 +341,7 @@ export type BotsBotCheck = {
 };
 
 export type BotsCreateBotRequest = {
+    acl_preset?: string;
     avatar_url?: string;
     display_name?: string;
     is_active?: boolean;
@@ -443,7 +444,7 @@ export type ChannelChannelCapabilities = {
 
 export type ChannelChannelConfig = {
     bot_id?: string;
-    channel_type?: string;
+    channel_type?: ChannelChannelType;
     created_at?: string;
     credentials?: {
         [key: string]: unknown;
@@ -463,7 +464,7 @@ export type ChannelChannelConfig = {
 
 export type ChannelChannelIdentityBinding = {
     channel_identity_id?: string;
-    channel_type?: string;
+    channel_type?: ChannelChannelType;
     config?: {
         [key: string]: unknown;
     };
@@ -471,6 +472,8 @@ export type ChannelChannelIdentityBinding = {
     id?: string;
     updated_at?: string;
 };
+
+export type ChannelChannelType = 'telegram' | 'feishu' | 'dingtalk' | 'matrix' | 'discord' | 'qq' | 'wecom' | 'weixin' | 'wechatoa' | 'local';
 
 export type ChannelConfigSchema = {
     fields?: {
@@ -483,6 +486,7 @@ export type ChannelFieldSchema = {
     description?: string;
     enum?: Array<string>;
     example?: unknown;
+    order?: number;
     required?: boolean;
     title?: string;
     type?: ChannelFieldType;
@@ -738,18 +742,24 @@ export type HandlersChannelMeta = {
     user_config_schema?: ChannelConfigSchema;
 };
 
+export type HandlersContainerGpuRequest = {
+    devices?: Array<string>;
+};
+
 export type HandlersContextUsage = {
     context_window?: number;
     used_tokens?: number;
 };
 
 export type HandlersCreateContainerRequest = {
+    gpu?: HandlersContainerGpuRequest;
     image?: string;
     restore_data?: boolean;
     snapshotter?: string;
 };
 
 export type HandlersCreateContainerResponse = {
+    cdi_devices?: Array<string>;
     container_id?: string;
     data_restored?: boolean;
     has_preserved_data?: boolean;
@@ -830,6 +840,7 @@ export type HandlersFsWriteRequest = {
 };
 
 export type HandlersGetContainerResponse = {
+    cdi_devices?: Array<string>;
     container_id?: string;
     container_path?: string;
     created_at?: string;
@@ -1383,12 +1394,38 @@ export type ProvidersImportModelsResponse = {
     skipped?: number;
 };
 
+export type ProvidersOAuthAccount = {
+    avatar_url?: string;
+    email?: string;
+    label?: string;
+    login?: string;
+    name?: string;
+    profile_url?: string;
+};
+
+export type ProvidersOAuthAuthorizeResponse = {
+    auth_url?: string;
+    device?: ProvidersOAuthDeviceStatus;
+    mode?: string;
+};
+
+export type ProvidersOAuthDeviceStatus = {
+    expires_at?: string;
+    interval_seconds?: number;
+    pending?: boolean;
+    user_code?: string;
+    verification_uri?: string;
+};
+
 export type ProvidersOAuthStatus = {
+    account?: ProvidersOAuthAccount;
     callback_url?: string;
     configured?: boolean;
+    device?: ProvidersOAuthDeviceStatus;
     expired?: boolean;
     expires_at?: string;
     has_token?: boolean;
+    mode?: string;
 };
 
 export type ProvidersTestResponse = {
@@ -1548,6 +1585,7 @@ export type SettingsSettings = {
     compaction_model_id?: string;
     compaction_ratio?: number;
     compaction_threshold?: number;
+    context_token_budget?: number;
     discuss_probe_model_id?: string;
     heartbeat_enabled?: boolean;
     heartbeat_interval?: number;
@@ -1555,9 +1593,11 @@ export type SettingsSettings = {
     image_model_id?: string;
     language?: string;
     memory_provider_id?: string;
+    persist_full_tool_results?: boolean;
     reasoning_effort?: string;
     reasoning_enabled?: boolean;
     search_provider_id?: string;
+    timezone?: string;
     title_model_id?: string;
     tts_model_id?: string;
 };
@@ -1570,6 +1610,7 @@ export type SettingsUpsertRequest = {
     compaction_model_id?: string;
     compaction_ratio?: number;
     compaction_threshold?: number;
+    context_token_budget?: number;
     discuss_probe_model_id?: string;
     heartbeat_enabled?: boolean;
     heartbeat_interval?: number;
@@ -1577,9 +1618,11 @@ export type SettingsUpsertRequest = {
     image_model_id?: string;
     language?: string;
     memory_provider_id?: string;
+    persist_full_tool_results?: boolean;
     reasoning_effort?: string;
     reasoning_enabled?: boolean;
     search_provider_id?: string;
+    timezone?: string;
     title_model_id?: string;
     tts_model_id?: string;
 };
@@ -7709,12 +7752,44 @@ export type GetProvidersByIdOauthAuthorizeResponses = {
     /**
      * OK
      */
-    200: {
-        [key: string]: string;
-    };
+    200: ProvidersOAuthAuthorizeResponse;
 };
 
 export type GetProvidersByIdOauthAuthorizeResponse = GetProvidersByIdOauthAuthorizeResponses[keyof GetProvidersByIdOauthAuthorizeResponses];
+
+export type PostProvidersByIdOauthPollData = {
+    body?: never;
+    path: {
+        /**
+         * Provider ID (UUID)
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/providers/{id}/oauth/poll';
+};
+
+export type PostProvidersByIdOauthPollErrors = {
+    /**
+     * Bad Request
+     */
+    400: HandlersErrorResponse;
+    /**
+     * Not Found
+     */
+    404: HandlersErrorResponse;
+};
+
+export type PostProvidersByIdOauthPollError = PostProvidersByIdOauthPollErrors[keyof PostProvidersByIdOauthPollErrors];
+
+export type PostProvidersByIdOauthPollResponses = {
+    /**
+     * OK
+     */
+    200: ProvidersOAuthStatus;
+};
+
+export type PostProvidersByIdOauthPollResponse = PostProvidersByIdOauthPollResponses[keyof PostProvidersByIdOauthPollResponses];
 
 export type GetProvidersByIdOauthStatusData = {
     body?: never;

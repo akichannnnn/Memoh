@@ -54,13 +54,8 @@ type chatACL interface {
 }
 
 type mediaIngestor interface {
-	Ingest(ctx context.Context, input media.IngestInput) (media.Asset, error)
-	// GetByStorageKey resolves an asset by reading its sidecar JSON.
-	GetByStorageKey(ctx context.Context, botID, storageKey string) (media.Asset, error)
-	// AccessPath returns a consumer-accessible reference for a persisted asset.
-	AccessPath(asset media.Asset) string
-	// IngestContainerFile reads a file from /data/ and ingests it into media store.
-	IngestContainerFile(ctx context.Context, botID, containerPath string) (media.Asset, error)
+	channel.OutboundAttachmentStore
+	channel.ContainerAttachmentIngester
 }
 
 // ttsSynthesizer synthesizes text to speech audio.
@@ -76,6 +71,7 @@ type ttsModelResolver interface {
 // SessionEnsurer resolves or creates an active session for a route.
 type SessionEnsurer interface {
 	EnsureActiveSession(ctx context.Context, botID, routeID, channelType string) (SessionResult, error)
+	GetActiveSession(ctx context.Context, routeID string) (SessionResult, error)
 	// CreateNewSession always creates a fresh session and sets it as the
 	// active session for the given route, replacing any previous one.
 	// sessionType defaults to "chat" if empty.
@@ -238,14 +234,14 @@ func (p *ChannelInboundProcessor) SetDispatcher(dispatcher *RouteDispatcher) {
 }
 
 // HandleInbound processes an inbound channel message through identity resolution and chat gateway.
-func (p *ChannelInboundProcessor) HandleInbound(ctx context.Context, cfg channel.ChannelConfig, msg channel.InboundMessage, sender channel.StreamReplySender) error {
+func (p *ChannelInboundProcessor) HandleInbound(ctx context.Context, cfg channel.ChannelConfig, msg channel.InboundMessage, sender channel.StreamReplySender) (retErr error) {
 	if p.runner == nil {
 		return errors.New("channel inbound processor not configured")
 	}
 	if sender == nil {
 		return errors.New("reply sender not configured")
 	}
-	text := buildInboundQuery(msg.Message, nil)
+	text := strings.TrimSpace(msg.Message.PlainText())
 	if p.logger != nil {
 		p.logger.Debug("inbound handle start",
 			slog.String("channel", msg.Channel.String()),
@@ -303,11 +299,23 @@ func (p *ChannelInboundProcessor) HandleInbound(ctx context.Context, cfg channel
 	if isStopCommand(cmdText) && isDirectedAtBot(msg) {
 		return p.handleStopCommand(ctx, cfg, msg, sender, identity)
 	}
+	if isStatusCommand(cmdText) && isDirectedAtBot(msg) {
+		return p.handleStatusCommand(ctx, cfg, msg, sender, identity)
+	}
 
 	// Skip generic command handler for mode-prefix commands (/btw, /now, /next)
 	// so they pass through to mode detection below.
 	if p.commandHandler != nil && p.commandHandler.IsCommand(cmdText) && !IsModeCommand(cmdText) && isDirectedAtBot(msg) {
-		reply, err := p.commandHandler.Execute(ctx, strings.TrimSpace(identity.BotID), strings.TrimSpace(identity.ChannelIdentityID), cmdText)
+		reply, err := p.commandHandler.ExecuteWithInput(ctx, command.ExecuteInput{
+			BotID:             strings.TrimSpace(identity.BotID),
+			ChannelIdentityID: strings.TrimSpace(identity.ChannelIdentityID),
+			UserID:            strings.TrimSpace(identity.UserID),
+			Text:              cmdText,
+			ChannelType:       msg.Channel.String(),
+			ConversationType:  strings.TrimSpace(msg.Conversation.Type),
+			ConversationID:    strings.TrimSpace(msg.Conversation.ID),
+			ThreadID:          extractThreadID(msg),
+		})
 		if err != nil {
 			reply = "Error: " + err.Error()
 		}
@@ -319,7 +327,7 @@ func (p *ChannelInboundProcessor) HandleInbound(ctx context.Context, cfg channel
 
 	resolvedAttachments := p.ingestInboundAttachments(ctx, cfg, msg, strings.TrimSpace(identity.BotID), msg.Message.Attachments)
 	attachments := mapChannelToChatAttachments(resolvedAttachments)
-	text = buildInboundQuery(msg.Message, attachments)
+	text = strings.TrimSpace(msg.Message.PlainText())
 
 	// Detect inbound mode from message prefix (/btw, /now, /next).
 	// Only applies to non-local channels; WebUI always uses the default flow.
@@ -352,17 +360,25 @@ func (p *ChannelInboundProcessor) HandleInbound(ctx context.Context, cfg channel
 	}
 
 	// Resolve or auto-create the active session for this route.
+	// Retry up to 3 times with short backoff to avoid persisting messages with NULL session_id.
 	sessionID := ""
 	sessionType := ""
 	if p.sessionEnsurer != nil {
-		sess, sessErr := p.sessionEnsurer.EnsureActiveSession(ctx, identity.BotID, resolved.RouteID, msg.Channel.String())
-		if sessErr != nil {
-			if p.logger != nil {
-				p.logger.Warn("ensure active session failed", slog.Any("error", sessErr))
+		for attempt := range 3 {
+			sess, sessErr := p.sessionEnsurer.EnsureActiveSession(ctx, identity.BotID, resolved.RouteID, msg.Channel.String())
+			if sessErr == nil {
+				sessionID = sess.ID
+				sessionType = sess.Type
+				break
 			}
-		} else {
-			sessionID = sess.ID
-			sessionType = sess.Type
+			if p.logger != nil {
+				p.logger.Warn("ensure active session failed",
+					slog.Int("attempt", attempt+1),
+					slog.Any("error", sessErr))
+			}
+			if attempt < 2 {
+				time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
+			}
 		}
 	}
 
@@ -409,7 +425,10 @@ func (p *ChannelInboundProcessor) HandleInbound(ctx context.Context, cfg channel
 		if _, loaded := p.pipeline.GetIC(sessionID); !loaded {
 			p.replayPipelineSession(ctx, sessionID)
 		}
-		event := pipelinepkg.AdaptInbound(msg, sessionID, identity.ChannelIdentityID, identity.DisplayName)
+		pipelineMsg := msg
+		pipelineMsg.Message = msg.Message
+		pipelineMsg.Message.Attachments = resolvedAttachments
+		event := pipelinepkg.AdaptInbound(pipelineMsg, sessionID, identity.ChannelIdentityID, identity.DisplayName)
 		if p.eventStore != nil {
 			eid, persistErr := p.eventStore.PersistEvent(ctx, identity.BotID, sessionID, event)
 			if persistErr != nil {
@@ -628,8 +647,32 @@ startStream:
 		}
 		return err
 	}
+	streamClosed := false
+	closeStream := func() error {
+		if streamClosed {
+			return nil
+		}
+		streamClosed = true
+		return stream.Close(context.WithoutCancel(ctx))
+	}
 	defer func() {
-		_ = stream.Close(context.WithoutCancel(ctx))
+		if streamClosed {
+			return
+		}
+		if closeErr := closeStream(); closeErr != nil {
+			if p.logger != nil {
+				p.logger.Error(
+					"reply stream close failed",
+					slog.String("channel", msg.Channel.String()),
+					slog.String("channel_identity_id", identity.ChannelIdentityID),
+					slog.String("user_id", identity.UserID),
+					slog.Any("error", closeErr),
+				)
+			}
+			if retErr == nil {
+				retErr = closeErr
+			}
+		}
 	}()
 
 	// For non-local channels, wrap the stream so events are mirrored to the
@@ -670,26 +713,11 @@ startStream:
 	// can be injected or queued. Produces the inject channel for this stream.
 	// Parallel mode (/now) skips the dispatcher entirely — it must not
 	// interfere with the active flag or drain the queue of another stream.
-	var injectCh <-chan InjectMessage
+	var injectCh <-chan conversation.InjectMessage
 	if p.dispatcher != nil && !isLocalChannelType(msg.Channel) && inboundMode != ModeParallel {
 		injectCh = p.dispatcher.MarkActive(routeID)
 		defer func() {
 			p.drainQueue(context.WithoutCancel(ctx), routeID)
-		}()
-	}
-	// Convert inbound InjectMessage channel to conversation.InjectMessage channel.
-	var convInjectCh chan conversation.InjectMessage
-	if injectCh != nil {
-		convInjectCh = make(chan conversation.InjectMessage, injectChBuffer)
-		go func() {
-			for im := range injectCh {
-				convInjectCh <- conversation.InjectMessage{
-					Text:            im.Text,
-					Attachments:     im.Attachments,
-					HeaderifiedText: im.HeaderifiedText,
-				}
-			}
-			close(convInjectCh)
 		}()
 	}
 
@@ -715,8 +743,8 @@ startStream:
 		OutboundAssetCollector:  assetCollector,
 		EventID:                 eventID,
 	}
-	if convInjectCh != nil {
-		chatReq.InjectCh = convInjectCh
+	if injectCh != nil {
+		chatReq.InjectCh = injectCh
 	}
 	if mid, _ := msg.Metadata["model_id"].(string); strings.TrimSpace(mid) != "" {
 		chatReq.Model = strings.TrimSpace(mid)
@@ -760,7 +788,7 @@ startStream:
 			}
 			for i, event := range events {
 				if event.Type == channel.StreamEventAttachment && len(event.Attachments) > 0 {
-					ingested := p.ingestOutboundAttachments(ctx, strings.TrimSpace(identity.BotID), event.Attachments)
+					ingested := p.ingestOutboundAttachments(ctx, strings.TrimSpace(identity.BotID), msg.Channel, event.Attachments)
 					events[i].Attachments = ingested
 					assetMu.Lock()
 					outboundAssetRefs = append(outboundAssetRefs, buildAssetRefs(ingested, len(outboundAssetRefs))...)
@@ -771,7 +799,7 @@ startStream:
 					continue
 				}
 				if event.Type == channel.StreamEventSpeech && len(event.Speeches) > 0 {
-					p.synthesizeAndPushVoice(ctx, strings.TrimSpace(identity.BotID), event.Speeches, stream, &outboundAssetRefs, &assetMu)
+					p.synthesizeAndPushVoice(ctx, strings.TrimSpace(identity.BotID), msg.Channel, event.Speeches, stream, &outboundAssetRefs, &assetMu)
 					continue
 				}
 				if pushErr := stream.Push(ctx, events[i]); pushErr != nil {
@@ -826,6 +854,14 @@ startStream:
 		}); err != nil {
 			return err
 		}
+		if err := closeStream(); err != nil {
+			if statusNotifier != nil {
+				if notifyErr := p.notifyProcessingFailed(ctx, statusNotifier, cfg, msg, statusInfo, statusHandle, err); notifyErr != nil {
+					p.logProcessingStatusError("processing_failed", msg, identity, notifyErr)
+				}
+			}
+			return err
+		}
 		if statusNotifier != nil {
 			if notifyErr := p.notifyProcessingCompleted(ctx, statusNotifier, cfg, msg, statusInfo, statusHandle); notifyErr != nil {
 				p.logProcessingStatusError("processing_completed", msg, identity, notifyErr)
@@ -866,6 +902,14 @@ startStream:
 		Type:   channel.StreamEventStatus,
 		Status: channel.StreamStatusCompleted,
 	}); err != nil {
+		return err
+	}
+	if err := closeStream(); err != nil {
+		if statusNotifier != nil {
+			if notifyErr := p.notifyProcessingFailed(ctx, statusNotifier, cfg, msg, statusInfo, statusHandle, err); notifyErr != nil {
+				p.logProcessingStatusError("processing_failed", msg, identity, notifyErr)
+			}
+		}
 		return err
 	}
 	if statusNotifier != nil {
@@ -1070,7 +1114,7 @@ func (p *ChannelInboundProcessor) persistPassiveMessage(
 		if ch == "" {
 			continue
 		}
-		assets = append(assets, messagepkg.AssetRef{
+		ref := messagepkg.AssetRef{
 			ContentHash: ch,
 			Role:        "attachment",
 			Ordinal:     i,
@@ -1078,7 +1122,13 @@ func (p *ChannelInboundProcessor) persistPassiveMessage(
 			SizeBytes:   att.Size,
 			Name:        strings.TrimSpace(att.Name),
 			Metadata:    att.Metadata,
-		})
+		}
+		if att.Metadata != nil {
+			if sk, ok := att.Metadata["storage_key"].(string); ok {
+				ref.StorageKey = sk
+			}
+		}
+		assets = append(assets, ref)
 	}
 
 	if _, err := p.message.Persist(ctx, messagepkg.PersistInput{
@@ -1347,10 +1397,6 @@ func mapStreamChunkToChannelEvents(chunk conversation.StreamChunk) ([]channel.St
 	}
 }
 
-func buildInboundQuery(message channel.Message, _ []conversation.ChatAttachment) string {
-	return strings.TrimSpace(message.PlainText())
-}
-
 func normalizeContentPartType(raw string) channel.MessagePartType {
 	switch strings.TrimSpace(strings.ToLower(raw)) {
 	case "link":
@@ -1568,10 +1614,17 @@ func isMessagingToolDuplicate(text string, sentTexts []string) bool {
 	return false
 }
 
-// requireIdentity resolves identity for the current message. Always resolves from msg so each sender is identified correctly (no reuse of context state across messages).
+// requireIdentity resolves identity for the current message.
+// It first checks whether the middleware chain already resolved and stored an
+// IdentityState in the context (via IdentityResolver.Middleware), and reuses
+// that result to avoid a redundant round-trip to the identity store. If no
+// cached state is found it falls back to a fresh Resolve call.
 func (p *ChannelInboundProcessor) requireIdentity(ctx context.Context, cfg channel.ChannelConfig, msg channel.InboundMessage) (IdentityState, error) {
 	if p.identity == nil {
 		return IdentityState{}, errors.New("identity resolver not configured")
+	}
+	if state, ok := IdentityStateFromContext(ctx); ok {
+		return state, nil
 	}
 	return p.identity.Resolve(ctx, cfg, msg)
 }
@@ -1892,175 +1945,32 @@ func (p *ChannelInboundProcessor) resolveAttachmentResolver(channelType channel.
 // media service, replacing ephemeral data URLs with stable asset references.
 // For container-internal paths (non-HTTP), it attempts to resolve the existing
 // asset by matching the storage key extracted from the path.
-func (p *ChannelInboundProcessor) ingestOutboundAttachments(ctx context.Context, botID string, attachments []channel.Attachment) []channel.Attachment {
+func (p *ChannelInboundProcessor) ingestOutboundAttachments(ctx context.Context, botID string, channelType channel.ChannelType, attachments []channel.Attachment) []channel.Attachment {
 	if len(attachments) == 0 || p.mediaService == nil || strings.TrimSpace(botID) == "" {
 		return attachments
 	}
-	result := make([]channel.Attachment, 0, len(attachments))
-	for _, att := range attachments {
-		item := att
-		rawURL := strings.TrimSpace(item.URL)
-		if strings.TrimSpace(item.ContentHash) != "" {
-			if item.Metadata == nil {
-				item.Metadata = make(map[string]any)
-			}
-			if _, ok := item.Metadata["bot_id"]; !ok {
-				item.Metadata["bot_id"] = botID
-			}
-			result = append(result, item)
-			continue
+	prepared, err := channel.PrepareStreamEvent(ctx, p.mediaService, channel.ChannelConfig{
+		BotID:       botID,
+		ChannelType: channelType,
+	}, channel.StreamEvent{
+		Type:        channel.StreamEventAttachment,
+		Attachments: attachments,
+	})
+	if err != nil {
+		if p.logger != nil {
+			p.logger.Warn("prepare outbound attachments failed", slog.Any("error", err))
 		}
-		// Non-data-URL, non-HTTP path: try to resolve as an existing asset via storage key.
-		if rawURL != "" && !isDataURL(rawURL) && !isHTTPURL(rawURL) {
-			if resolved := p.resolveContainerPathAsset(ctx, botID, rawURL, &item); resolved {
-				result = append(result, item)
-				continue
-			}
-			result = append(result, item)
-			continue
-		}
-		if !isDataURL(rawURL) {
-			result = append(result, item)
-			continue
-		}
-		decoded, err := attachment.DecodeBase64(rawURL, media.MaxAssetBytes)
-		if err != nil {
-			if p.logger != nil {
-				p.logger.Warn("decode outbound attachment data url failed", slog.Any("error", err))
-			}
-			result = append(result, item)
-			continue
-		}
-		mimeType := attachment.NormalizeMime(item.Mime)
-		if mimeType == "" {
-			mimeType = attachment.MimeFromDataURL(rawURL)
-		}
-		asset, err := p.mediaService.Ingest(ctx, media.IngestInput{
-			BotID:    botID,
-			Mime:     mimeType,
-			Reader:   decoded,
-			MaxBytes: media.MaxAssetBytes,
-		})
-		if err != nil {
-			if p.logger != nil {
-				p.logger.Warn("ingest outbound attachment failed", slog.Any("error", err))
-			}
-			result = append(result, item)
-			continue
-		}
-		sourceURL := item.URL
-		item.ContentHash = asset.ContentHash
-		item.URL = ""
-		item.Base64 = ""
-		if item.Metadata == nil {
-			item.Metadata = make(map[string]any)
-		}
-		item.Metadata["bot_id"] = botID
-		item.Metadata["storage_key"] = asset.StorageKey
-		if n := strings.TrimSpace(item.Name); n != "" {
-			item.Metadata["name"] = n
-		}
-		if su := strings.TrimSpace(sourceURL); su != "" && !isDataURL(su) {
-			item.Metadata["source_url"] = su
-		}
-		if strings.TrimSpace(item.Mime) == "" {
-			item.Mime = attachment.NormalizeMime(asset.Mime)
-		}
-		if item.Size == 0 && asset.SizeBytes > 0 {
-			item.Size = asset.SizeBytes
-		}
-		result = append(result, item)
+		return attachments
 	}
-	return result
+	return prepared.LogicalEvent().Attachments
 }
 
 func isDataURL(raw string) bool {
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(raw)), "data:")
+	return channel.IsDataURL(raw)
 }
 
 func isHTTPURL(raw string) bool {
-	lower := strings.ToLower(strings.TrimSpace(raw))
-	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
-}
-
-// resolveContainerPathAsset attempts to match a container-internal file path
-// to an existing media asset by extracting the storage key from the path.
-// For non-media-marker paths, it ingests the file into the media store first.
-// Returns true if the asset was resolved and item was updated.
-func (p *ChannelInboundProcessor) resolveContainerPathAsset(ctx context.Context, botID, accessPath string, item *channel.Attachment) bool {
-	sourcePath := accessPath
-
-	// Try media marker lookup first.
-	storageKey := extractStorageKey(accessPath, botID)
-	if storageKey != "" {
-		asset, err := p.mediaService.GetByStorageKey(ctx, botID, storageKey)
-		if err == nil {
-			applyAssetToAttachment(asset, botID, item, sourcePath)
-			return true
-		}
-	}
-
-	// For any path starting with data mount, ingest the file into media store.
-	dataPrefix := "/data"
-	if !strings.HasSuffix(dataPrefix, "/") {
-		dataPrefix += "/"
-	}
-	if strings.HasPrefix(accessPath, dataPrefix) {
-		asset, err := p.mediaService.IngestContainerFile(ctx, botID, accessPath)
-		if err != nil {
-			if p.logger != nil {
-				p.logger.Warn("ingest container file for stream failed", slog.String("path", accessPath), slog.Any("error", err))
-			}
-			return false
-		}
-		applyAssetToAttachment(asset, botID, item, sourcePath)
-		return true
-	}
-
-	return false
-}
-
-func applyAssetToAttachment(asset media.Asset, botID string, item *channel.Attachment, sourcePath string) {
-	sourceURL := item.URL
-	item.ContentHash = asset.ContentHash
-	item.URL = ""
-	if item.Metadata == nil {
-		item.Metadata = make(map[string]any)
-	}
-	item.Metadata["bot_id"] = botID
-	item.Metadata["storage_key"] = asset.StorageKey
-	if n := strings.TrimSpace(item.Name); n != "" {
-		item.Metadata["name"] = n
-	}
-	if sp := strings.TrimSpace(sourcePath); sp != "" {
-		item.Metadata["source_path"] = sp
-	}
-	if su := strings.TrimSpace(sourceURL); su != "" && !isDataURL(su) {
-		item.Metadata["source_url"] = su
-	}
-	if strings.TrimSpace(item.Mime) == "" {
-		item.Mime = attachment.NormalizeMime(asset.Mime)
-	}
-	if item.Size == 0 && asset.SizeBytes > 0 {
-		item.Size = asset.SizeBytes
-	}
-	if item.Type == channel.AttachmentFile || item.Type == "" {
-		item.Type = inferAttachmentTypeFromMime(strings.TrimSpace(item.Mime))
-	}
-}
-
-func inferAttachmentTypeFromMime(mime string) channel.AttachmentType {
-	mime = strings.ToLower(strings.TrimSpace(mime))
-	switch {
-	case strings.HasPrefix(mime, "image/"):
-		return channel.AttachmentImage
-	case strings.HasPrefix(mime, "audio/"):
-		return channel.AttachmentAudio
-	case strings.HasPrefix(mime, "video/"):
-		return channel.AttachmentVideo
-	default:
-		return channel.AttachmentFile
-	}
+	return channel.IsHTTPURL(raw)
 }
 
 // extractStorageKey derives the media storage key from a container-internal
@@ -2081,7 +1991,7 @@ func extractStorageKey(accessPath string, _ string) string {
 // natively (e.g. web). Wrapping these with a tee would cause duplicate events.
 func isLocalChannelType(ct channel.ChannelType) bool {
 	s := strings.ToLower(strings.TrimSpace(string(ct)))
-	return s == "local"
+	return s == "web" || s == "cli"
 }
 
 // replayPipelineSession loads persisted events from the DB and replays them
@@ -2140,7 +2050,8 @@ func (p *ChannelInboundProcessor) broadcastInboundMessage(
 }
 
 // channelAttachmentsToAssetRefs converts channel Attachments to message AssetRefs
-// with full metadata for denormalized persistence.
+// for denormalized persistence. Only attachments with a non-empty ContentHash are
+// included. StorageKey is extracted from Metadata when present.
 func channelAttachmentsToAssetRefs(attachments []channel.Attachment, role string) []messagepkg.AssetRef {
 	if len(attachments) == 0 {
 		return nil
@@ -2157,6 +2068,8 @@ func channelAttachmentsToAssetRefs(attachments []channel.Attachment, role string
 			Ordinal:     idx,
 			Mime:        strings.TrimSpace(att.Mime),
 			SizeBytes:   att.Size,
+			Name:        strings.TrimSpace(att.Name),
+			Metadata:    att.Metadata,
 		}
 		if att.Metadata != nil {
 			if sk, ok := att.Metadata["storage_key"].(string); ok {
@@ -2245,6 +2158,7 @@ func parseAttachmentDelta(raw json.RawMessage) []channel.Attachment {
 func (p *ChannelInboundProcessor) synthesizeAndPushVoice(
 	ctx context.Context,
 	botID string,
+	channelType channel.ChannelType,
 	speeches []channel.SpeechRequest,
 	stream channel.OutboundStream,
 	outboundAssetRefs *[]conversation.OutboundAssetRef,
@@ -2287,7 +2201,7 @@ func (p *ChannelInboundProcessor) synthesizeAndPushVoice(
 				},
 			},
 		}
-		ingested := p.ingestOutboundAttachments(ctx, botID, voiceEvent.Attachments)
+		ingested := p.ingestOutboundAttachments(ctx, botID, channelType, voiceEvent.Attachments)
 		voiceEvent.Attachments = ingested
 		assetMu.Lock()
 		*outboundAssetRefs = append(*outboundAssetRefs, buildAssetRefs(ingested, len(*outboundAssetRefs))...)
@@ -2599,6 +2513,18 @@ func isNewSessionCommand(cmdText string) bool {
 	return parsed.Resource == "new"
 }
 
+func isStatusCommand(cmdText string) bool {
+	extracted := command.ExtractCommandText(cmdText)
+	if extracted == "" {
+		return false
+	}
+	parsed, err := command.Parse(extracted)
+	if err != nil {
+		return false
+	}
+	return parsed.Resource == "status"
+}
+
 // resolveNewSessionType determines the session type for /new command.
 // /new chat → chat, /new discuss → discuss, /new (no arg) → default by context.
 // WebUI (local channel) always defaults to chat.
@@ -2719,5 +2645,85 @@ func (p *ChannelInboundProcessor) handleNewSessionCommand(
 	return sender.Send(ctx, channel.OutboundMessage{
 		Target:  target,
 		Message: channel.Message{Text: fmt.Sprintf("New %s conversation started.", modeLabel)},
+	})
+}
+
+func (p *ChannelInboundProcessor) handleStatusCommand(
+	ctx context.Context,
+	cfg channel.ChannelConfig,
+	msg channel.InboundMessage,
+	sender channel.StreamReplySender,
+	identity InboundIdentity,
+) error {
+	target := strings.TrimSpace(msg.ReplyTarget)
+	if target == "" {
+		return errors.New("reply target missing for /status command")
+	}
+	if p.routeResolver == nil {
+		return sender.Send(ctx, channel.OutboundMessage{
+			Target:  target,
+			Message: channel.Message{Text: "Error: route resolver not configured."},
+		})
+	}
+	if p.commandHandler == nil {
+		return sender.Send(ctx, channel.OutboundMessage{
+			Target:  target,
+			Message: channel.Message{Text: "Error: command handler not configured."},
+		})
+	}
+
+	threadID := extractThreadID(msg)
+	routeMetadata := buildRouteMetadata(msg, identity)
+	p.enrichConversationAvatar(ctx, cfg, msg, routeMetadata)
+	resolved, err := p.routeResolver.ResolveConversation(ctx, route.ResolveInput{
+		BotID:             identity.BotID,
+		Platform:          msg.Channel.String(),
+		ConversationID:    msg.Conversation.ID,
+		ThreadID:          threadID,
+		ConversationType:  msg.Conversation.Type,
+		ChannelIdentityID: identity.UserID,
+		ChannelConfigID:   identity.ChannelConfigID,
+		ReplyTarget:       target,
+		Metadata:          routeMetadata,
+	})
+	if err != nil {
+		if p.logger != nil {
+			p.logger.Warn("resolve route for /status command failed", slog.Any("error", err))
+		}
+		return sender.Send(ctx, channel.OutboundMessage{
+			Target:  target,
+			Message: channel.Message{Text: "Error: failed to resolve conversation route."},
+		})
+	}
+
+	sessionID := ""
+	if p.sessionEnsurer != nil {
+		sess, sessErr := p.sessionEnsurer.GetActiveSession(ctx, resolved.RouteID)
+		if sessErr == nil {
+			sessionID = strings.TrimSpace(sess.ID)
+		} else if p.logger != nil {
+			p.logger.Debug("resolve active session for /status command failed", slog.Any("error", sessErr))
+		}
+	}
+
+	reply, execErr := p.commandHandler.ExecuteWithInput(ctx, command.ExecuteInput{
+		BotID:             strings.TrimSpace(identity.BotID),
+		ChannelIdentityID: strings.TrimSpace(identity.ChannelIdentityID),
+		UserID:            strings.TrimSpace(identity.UserID),
+		Text:              rawTextForCommand(msg, strings.TrimSpace(msg.Message.PlainText())),
+		ChannelType:       msg.Channel.String(),
+		ConversationType:  strings.TrimSpace(msg.Conversation.Type),
+		ConversationID:    strings.TrimSpace(msg.Conversation.ID),
+		ThreadID:          threadID,
+		RouteID:           strings.TrimSpace(resolved.RouteID),
+		SessionID:         sessionID,
+	})
+	if execErr != nil {
+		reply = "Error: " + execErr.Error()
+	}
+
+	return sender.Send(ctx, channel.OutboundMessage{
+		Target:  target,
+		Message: channel.Message{Text: reply},
 	})
 }

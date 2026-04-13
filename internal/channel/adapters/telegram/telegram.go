@@ -3,7 +3,6 @@ package telegram
 import (
 	"cmp"
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -17,9 +16,10 @@ import (
 	"unicode/utf8"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"golang.org/x/time/rate"
 
 	"github.com/memohai/memoh/internal/channel"
-	"github.com/memohai/memoh/internal/channel/adapters/common"
+	"github.com/memohai/memoh/internal/channel/common"
 	"github.com/memohai/memoh/internal/media"
 	"github.com/memohai/memoh/internal/textutil"
 )
@@ -27,6 +27,7 @@ import (
 const (
 	telegramMaxMessageLength        = 4096
 	telegramMediaGroupCollectWindow = 700 * time.Millisecond
+	telegramUpdateDedupeTTL         = 10 * time.Minute
 )
 
 var (
@@ -48,9 +49,12 @@ type assetOpener interface {
 type TelegramAdapter struct {
 	logger        *slog.Logger
 	mu            sync.RWMutex
-	bots          map[string]*tgbotapi.BotAPI // keyed by bot token
-	fileEndpoints map[string]string           // token → file endpoint format string
+	bots          map[string]*tgbotapi.BotAPI // keyed by effective bot config
+	fileEndpoints map[*tgbotapi.BotAPI]string // bot instance → file endpoint format string
 	assets        assetOpener
+	streamLimiter *rate.Limiter // global rate limiter for all streaming API calls
+	seenUpdatesMu sync.Mutex
+	seenUpdates   map[string]time.Time
 }
 
 // NewTelegramAdapter creates a TelegramAdapter with the given logger.
@@ -61,7 +65,9 @@ func NewTelegramAdapter(log *slog.Logger) *TelegramAdapter {
 	adapter := &TelegramAdapter{
 		logger:        log.With(slog.String("adapter", "telegram")),
 		bots:          make(map[string]*tgbotapi.BotAPI),
-		fileEndpoints: make(map[string]string),
+		fileEndpoints: make(map[*tgbotapi.BotAPI]string),
+		streamLimiter: rate.NewLimiter(rate.Every(time.Second), 3), // 1 req/s sustained, burst of 3
+		seenUpdates:   make(map[string]time.Time),
 	}
 	initTelegramBotLogger(adapter.logger)
 	return adapter
@@ -72,6 +78,13 @@ func initTelegramBotLogger(log *slog.Logger) {
 		_ = tgbotapi.SetLogger(telegramBotLogger)
 	})
 	telegramBotLogger.SetLogger(log)
+}
+
+// waitStreamLimit waits for the global stream rate limiter to allow one request.
+// All streams from the same adapter share this limiter to coordinate and avoid
+// aggregate Telegram API rate limits across concurrent conversations.
+func (a *TelegramAdapter) waitStreamLimit(ctx context.Context) error {
+	return a.streamLimiter.Wait(ctx)
 }
 
 // SetAssetOpener injects the media asset reader for storage-first file delivery.
@@ -86,26 +99,38 @@ func (a *TelegramAdapter) getOrCreateBot(cfg Config, configID string) (*tgbotapi
 	if getOrCreateBotForTest != nil {
 		return getOrCreateBotForTest(a, cfg.BotToken, configID)
 	}
+	cacheKey := strings.Join([]string{
+		cfg.BotToken,
+		cfg.baseURL(),
+		cfg.HTTPProxy.CacheKey(),
+	}, "\x00")
 	a.mu.RLock()
-	bot, ok := a.bots[cfg.BotToken]
+	bot, ok := a.bots[cacheKey]
 	a.mu.RUnlock()
 	if ok {
 		return bot, nil
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if bot, ok := a.bots[cfg.BotToken]; ok {
+	if bot, ok := a.bots[cacheKey]; ok {
 		return bot, nil
 	}
-	bot, err := tgbotapi.NewBotAPIWithAPIEndpoint(cfg.BotToken, cfg.apiEndpoint())
+	httpClient, err := common.NewHTTPClient(30*time.Second, cfg.HTTPProxy)
+	if err != nil {
+		if a.logger != nil {
+			a.logger.Error("create bot http client failed", slog.String("config_id", configID), slog.Any("error", err))
+		}
+		return nil, err
+	}
+	bot, err = tgbotapi.NewBotAPIWithClient(cfg.BotToken, cfg.apiEndpoint(), httpClient)
 	if err != nil {
 		if a.logger != nil {
 			a.logger.Error("create bot failed", slog.String("config_id", configID), slog.Any("error", err))
 		}
 		return nil, err
 	}
-	a.bots[cfg.BotToken] = bot
-	a.fileEndpoints[cfg.BotToken] = cfg.fileEndpoint()
+	a.bots[cacheKey] = bot
+	a.fileEndpoints[bot] = cfg.fileEndpoint()
 	return bot, nil
 }
 
@@ -117,7 +142,7 @@ func (a *TelegramAdapter) getFileDirectURL(bot *tgbotapi.BotAPI, fileID string) 
 		return "", err
 	}
 	a.mu.RLock()
-	endpoint := a.fileEndpoints[bot.Token]
+	endpoint := a.fileEndpoints[bot]
 	a.mu.RUnlock()
 	if endpoint == "" {
 		endpoint = tgbotapi.FileEndpoint
@@ -166,13 +191,22 @@ func (*TelegramAdapter) Descriptor() channel.Descriptor {
 				"botToken": {
 					Type:     channel.FieldSecret,
 					Required: true,
+					Order:    0,
 					Title:    "Bot Token",
 				},
 				"apiBaseURL": {
 					Type:        channel.FieldString,
 					Required:    false,
+					Order:       10,
 					Title:       "API Base URL",
 					Description: "Reverse proxy base URL for the Telegram Bot API. Required in regions where Telegram is blocked (e.g. China mainland). Default: https://api.telegram.org",
+				},
+				"httpProxyUrl": {
+					Type:        channel.FieldSecret,
+					Required:    false,
+					Order:       20,
+					Title:       "HTTP Proxy URL",
+					Description: "Optional outbound HTTP proxy URL for Telegram API requests, e.g. http://user:pass@host:port. Explicit adapter proxy overrides HTTP_PROXY/HTTPS_PROXY.",
 				},
 			},
 		},
@@ -236,16 +270,13 @@ func (a *TelegramAdapter) Connect(ctx context.Context, cfg channel.ChannelConfig
 		}
 		return nil, err
 	}
-	bot, err := tgbotapi.NewBotAPIWithAPIEndpoint(telegramCfg.BotToken, telegramCfg.apiEndpoint())
+	bot, err := a.getOrCreateBot(telegramCfg, cfg.ID)
 	if err != nil {
 		if a.logger != nil {
 			a.logger.Error("create bot failed", slog.String("config_id", cfg.ID), slog.Any("error", err))
 		}
 		return nil, err
 	}
-	a.mu.Lock()
-	a.fileEndpoints[telegramCfg.BotToken] = telegramCfg.fileEndpoint()
-	a.mu.Unlock()
 	updateConfig := tgbotapi.NewUpdate(0)
 	updateConfig.Timeout = 30
 	updates := bot.GetUpdatesChan(updateConfig)
@@ -344,11 +375,20 @@ func (a *TelegramAdapter) Connect(ctx context.Context, cfg channel.ChannelConfig
 				if update.Message == nil {
 					continue
 				}
+				if a.seenTelegramUpdate(cfg.ID, update.UpdateID, time.Now()) {
+					if a.logger != nil {
+						a.logger.Debug("skip duplicate telegram update",
+							slog.String("config_id", cfg.ID),
+							slog.Int("update_id", update.UpdateID),
+						)
+					}
+					continue
+				}
 				if queueMediaGroup(update.Message) {
 					continue
 				}
 				flushMediaGroupsByChat(telegramChatID(update.Message))
-				msg, ok := a.buildTelegramInboundMessage(bot, cfg, update.Message)
+				msg, ok := a.buildTelegramInboundMessage(bot, cfg, update)
 				if !ok {
 					continue
 				}
@@ -410,14 +450,20 @@ func (a *TelegramAdapter) dispatchInbound(ctx context.Context, cfg channel.Chann
 	}()
 }
 
-func (a *TelegramAdapter) buildTelegramInboundMessage(bot *tgbotapi.BotAPI, cfg channel.ChannelConfig, raw *tgbotapi.Message) (channel.InboundMessage, bool) {
+func (a *TelegramAdapter) buildTelegramInboundMessage(bot *tgbotapi.BotAPI, cfg channel.ChannelConfig, update tgbotapi.Update) (channel.InboundMessage, bool) {
+	raw := update.Message
+	if raw == nil {
+		return channel.InboundMessage{}, false
+	}
 	text := strings.TrimSpace(raw.Text)
 	caption := strings.TrimSpace(raw.Caption)
 	if text == "" && caption != "" {
 		text = caption
 	}
 	attachments := a.collectTelegramAttachments(bot, raw)
-	return a.toInboundTelegramMessage(bot, cfg, raw, text, attachments, nil)
+	return a.toInboundTelegramMessage(bot, cfg, raw, text, attachments, map[string]any{
+		"update_id": update.UpdateID,
+	})
 }
 
 func (a *TelegramAdapter) buildTelegramMediaGroupInboundMessage(
@@ -477,6 +523,33 @@ func (a *TelegramAdapter) buildTelegramMediaGroupInboundMessage(
 		"media_group_size": len(items),
 	}
 	return a.toInboundTelegramMessage(bot, cfg, anchor, text, attachments, metadata)
+}
+
+func (a *TelegramAdapter) seenTelegramUpdate(configID string, updateID int, now time.Time) bool {
+	if a == nil || updateID <= 0 {
+		return false
+	}
+	key := strings.TrimSpace(configID) + ":" + strconv.Itoa(updateID)
+	if key == ":" {
+		return false
+	}
+
+	cutoff := now.Add(-telegramUpdateDedupeTTL)
+
+	a.seenUpdatesMu.Lock()
+	defer a.seenUpdatesMu.Unlock()
+
+	for seenKey, seenAt := range a.seenUpdates {
+		if seenAt.Before(cutoff) {
+			delete(a.seenUpdates, seenKey)
+		}
+	}
+
+	if _, exists := a.seenUpdates[key]; exists {
+		return true
+	}
+	a.seenUpdates[key] = now
+	return false
 }
 
 func (a *TelegramAdapter) toInboundTelegramMessage(
@@ -581,7 +654,7 @@ func (a *TelegramAdapter) logTelegramInbound(configID string, msg channel.Inboun
 }
 
 // Send delivers an outbound message to Telegram, handling text, attachments, and replies.
-func (a *TelegramAdapter) Send(ctx context.Context, cfg channel.ChannelConfig, msg channel.OutboundMessage) error {
+func (a *TelegramAdapter) Send(ctx context.Context, cfg channel.ChannelConfig, msg channel.PreparedOutboundMessage) error {
 	telegramCfg, err := parseConfig(cfg.Credentials)
 	if err != nil {
 		if a.logger != nil {
@@ -597,12 +670,12 @@ func (a *TelegramAdapter) Send(ctx context.Context, cfg channel.ChannelConfig, m
 	if err != nil {
 		return err
 	}
-	if msg.Message.IsEmpty() {
+	if msg.Message.Message.IsEmpty() {
 		return errors.New("message is required")
 	}
-	text := strings.TrimSpace(msg.Message.PlainText())
-	text, parseMode := formatTelegramOutput(text, msg.Message.Format)
-	replyTo := parseReplyToMessageID(msg.Message.Reply)
+	text := strings.TrimSpace(msg.Message.Message.PlainText())
+	text, parseMode := formatTelegramOutput(text, msg.Message.Message.Format)
+	replyTo := parseReplyToMessageID(msg.Message.Message.Reply)
 	if len(msg.Message.Attachments) > 0 {
 		usedCaption := false
 		for i, att := range msg.Message.Attachments {
@@ -615,7 +688,7 @@ func (a *TelegramAdapter) Send(ctx context.Context, cfg channel.ChannelConfig, m
 			if i > 0 {
 				applyReply = 0
 			}
-			if err := sendTelegramAttachmentWithAssets(ctx, bot, to, att, caption, applyReply, parseMode, a.assets); err != nil {
+			if err := sendTelegramAttachmentWithAssets(ctx, bot, to, att, caption, applyReply, parseMode); err != nil {
 				if a.logger != nil {
 					a.logger.Error("send attachment failed", slog.String("config_id", cfg.ID), slog.Any("error", err))
 				}
@@ -635,7 +708,7 @@ func (a *TelegramAdapter) Send(ctx context.Context, cfg channel.ChannelConfig, m
 // animation, then sends a final permanent message via sendMessage.
 // For group/channel chats, sends one message then edits it in place as deltas
 // arrive (editMessageText), avoiding one message per delta and rate limits.
-func (a *TelegramAdapter) OpenStream(ctx context.Context, cfg channel.ChannelConfig, target string, opts channel.StreamOptions) (channel.OutboundStream, error) {
+func (a *TelegramAdapter) OpenStream(ctx context.Context, cfg channel.ChannelConfig, target string, opts channel.StreamOptions) (channel.PreparedOutboundStream, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return nil, errors.New("telegram target is required")
@@ -861,29 +934,15 @@ func getTelegramRetryAfter(err error) time.Duration {
 	return 0
 }
 
-func sendTelegramAttachmentWithAssets(ctx context.Context, bot *tgbotapi.BotAPI, target string, att channel.Attachment, caption string, replyTo int, parseMode string, opener assetOpener) error {
-	return sendTelegramAttachmentImpl(ctx, bot, target, att, caption, replyTo, parseMode, opener)
+func sendTelegramAttachmentWithAssets(ctx context.Context, bot *tgbotapi.BotAPI, target string, att channel.PreparedAttachment, caption string, replyTo int, parseMode string) error {
+	return sendTelegramAttachmentImpl(ctx, bot, target, att, caption, replyTo, parseMode)
 }
 
-func sendTelegramAttachmentImpl(ctx context.Context, bot *tgbotapi.BotAPI, target string, att channel.Attachment, caption string, replyTo int, parseMode string, opener assetOpener) error {
-	urlRef := strings.TrimSpace(att.URL)
-	keyRef := strings.TrimSpace(att.PlatformKey)
-	sourcePlatform := strings.TrimSpace(att.SourcePlatform)
-	base64Ref := strings.TrimSpace(att.Base64)
-	assetID := strings.TrimSpace(att.ContentHash)
-	if urlRef == "" && keyRef == "" && base64Ref == "" && assetID == "" {
-		return errors.New("attachment reference is required")
+func sendTelegramAttachmentImpl(ctx context.Context, bot *tgbotapi.BotAPI, target string, att channel.PreparedAttachment, caption string, replyTo int, parseMode string) error {
+	if strings.TrimSpace(caption) == "" && strings.TrimSpace(att.Logical.Caption) != "" {
+		caption = strings.TrimSpace(att.Logical.Caption)
 	}
-	if strings.TrimSpace(caption) == "" && strings.TrimSpace(att.Caption) != "" {
-		caption = strings.TrimSpace(att.Caption)
-	}
-	var botID string
-	if att.Metadata != nil {
-		if bid, ok := att.Metadata["bot_id"].(string); ok {
-			botID = bid
-		}
-	}
-	file, err := resolveTelegramFile(ctx, urlRef, keyRef, base64Ref, sourcePlatform, att, assetID, botID, opener)
+	file, err := resolveTelegramFile(ctx, att)
 	if err != nil {
 		return err
 	}
@@ -892,7 +951,7 @@ func sendTelegramAttachmentImpl(ctx context.Context, bot *tgbotapi.BotAPI, targe
 		return targetErr
 	}
 	isChannel := channelUsername != ""
-	switch att.Type {
+	switch att.Logical.Type {
 	case channel.AttachmentImage:
 		var photo tgbotapi.PhotoConfig
 		if isChannel {
@@ -975,67 +1034,44 @@ func sendTelegramAttachmentImpl(ctx context.Context, bot *tgbotapi.BotAPI, targe
 		_, err = bot.Send(animation)
 		return err
 	default:
-		return fmt.Errorf("unsupported attachment type: %s", att.Type)
+		return fmt.Errorf("unsupported attachment type: %s", att.Logical.Type)
 	}
 }
 
-// resolveTelegramFile determines the best tgbotapi.RequestFileData for an attachment.
-// Priority: PlatformKey > ContentHash (storage) > public URL > base64 data URL.
-func resolveTelegramFile(ctx context.Context, urlRef, keyRef, base64Ref, sourcePlatform string, att channel.Attachment, assetID, botID string, opener assetOpener) (tgbotapi.RequestFileData, error) {
-	if keyRef != "" && (sourcePlatform == "" || strings.EqualFold(sourcePlatform, Type.String())) {
-		return tgbotapi.FileID(keyRef), nil
-	}
-	if assetID != "" && opener != nil {
-		reader, asset, err := opener.Open(ctx, botID, assetID)
-		if err == nil {
-			data, readErr := io.ReadAll(io.LimitReader(reader, media.MaxAssetBytes+1))
-			_ = reader.Close()
-			if readErr == nil && len(data) > 0 {
-				name := strings.TrimSpace(att.Name)
-				if name == "" {
-					name = fileNameFromMime(asset.Mime, string(att.Type))
-				}
-				return tgbotapi.FileBytes{Name: name, Bytes: data}, nil
-			}
+// resolveTelegramFile maps a prepared attachment into Telegram's file input model.
+func resolveTelegramFile(ctx context.Context, att channel.PreparedAttachment) (tgbotapi.RequestFileData, error) {
+	switch att.Kind {
+	case channel.PreparedAttachmentNativeRef:
+		if strings.TrimSpace(att.NativeRef) == "" {
+			return nil, errors.New("telegram native ref is required")
 		}
-	}
-	if urlRef != "" && !strings.HasPrefix(strings.ToLower(urlRef), "data:") && !strings.HasPrefix(urlRef, "/") {
-		return tgbotapi.FileURL(urlRef), nil
-	}
-	raw := base64Ref
-	if raw == "" {
-		raw = urlRef
-	}
-	if raw != "" && strings.HasPrefix(strings.ToLower(raw), "data:") {
-		decoded, err := decodeDataURLBytes(raw)
+		return tgbotapi.FileID(strings.TrimSpace(att.NativeRef)), nil
+	case channel.PreparedAttachmentPublicURL:
+		if strings.TrimSpace(att.PublicURL) == "" {
+			return nil, errors.New("telegram public url is required")
+		}
+		return tgbotapi.FileURL(strings.TrimSpace(att.PublicURL)), nil
+	case channel.PreparedAttachmentUpload:
+		if att.Open == nil {
+			return nil, errors.New("telegram upload attachment is not openable")
+		}
+		reader, err := att.Open(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("decode data url for telegram upload: %w", err)
+			return nil, err
+		}
+		defer func() { _ = reader.Close() }()
+		data, err := media.ReadAllWithLimit(reader, media.MaxAssetBytes)
+		if err != nil {
+			return nil, err
 		}
 		name := strings.TrimSpace(att.Name)
 		if name == "" {
-			name = fileNameFromMime(att.Mime, string(att.Type))
+			name = fileNameFromMime(att.Mime, string(att.Logical.Type))
 		}
-		return tgbotapi.FileBytes{Name: name, Bytes: decoded}, nil
+		return tgbotapi.FileBytes{Name: name, Bytes: data}, nil
+	default:
+		return nil, fmt.Errorf("unsupported telegram attachment kind: %s", att.Kind)
 	}
-	if urlRef != "" {
-		return tgbotapi.FileURL(urlRef), nil
-	}
-	return nil, errors.New("no usable attachment reference for telegram")
-}
-
-func decodeDataURLBytes(dataURL string) ([]byte, error) {
-	value := dataURL
-	if _, after, ok := strings.Cut(value, ","); ok {
-		value = after
-	}
-	return io.ReadAll(io.LimitReader(
-		base64StdDecoder(strings.NewReader(value)),
-		media.MaxAssetBytes+1,
-	))
-}
-
-func base64StdDecoder(r io.Reader) io.Reader {
-	return base64.NewDecoder(base64.StdEncoding, r)
 }
 
 func fileNameFromMime(mime, fallbackType string) string {

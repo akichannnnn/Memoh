@@ -22,7 +22,7 @@ services:
       - memoh-network
 
   migrate:
-    image: memohai/server:latest
+    image: memohai/server:local
     container_name: memoh-migrate
     entrypoint: ["/app/memoh-server", "migrate", "up"]
     volumes:
@@ -35,7 +35,7 @@ services:
       - memoh-network
 
   server:
-    image: memohai/server:latest
+    image: memohai/server:local
     container_name: memoh-server
     privileged: true
     pid: host
@@ -45,6 +45,9 @@ services:
       - containerd_data:/var/lib/containerd
       - server_cni_state:/var/lib/cni
       - memoh_data:/opt/memoh/data
+      # Expose host CDI specs to the nested containerd used for bot workspaces.
+      - /etc/cdi:/etc/cdi:ro
+      - /var/run/cdi:/var/run/cdi:ro
       - /etc/localtime:/etc/localtime:ro
     ports:
       - "8080:8080"
@@ -104,7 +107,7 @@ services:
       - memoh-network
 
   browser:
-    image: memohai/browser:${BROWSER_TAG:-latest}
+    image: memohai/browser:${BROWSER_TAG:-local}
     container_name: memoh-browser
     profiles: [browser]
     environment:

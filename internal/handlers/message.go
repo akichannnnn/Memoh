@@ -145,6 +145,7 @@ func (h *MessageHandler) ListMessages(c echo.Context) error {
 	}
 
 	before, hasBefore := parseBeforeParam(c.QueryParam("before"))
+	format := strings.ToLower(strings.TrimSpace(c.QueryParam("format")))
 
 	sessionID := strings.TrimSpace(c.QueryParam("session_id"))
 
@@ -172,6 +173,11 @@ func (h *MessageHandler) ListMessages(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}
 	h.fillAssetMimeFromStorage(c.Request().Context(), botID, messages)
+	if format == "ui" {
+		return c.JSON(http.StatusOK, map[string]any{
+			"items": conversation.ConvertMessagesToUITurns(messages),
+		})
+	}
 	return c.JSON(http.StatusOK, map[string]any{"items": messages})
 }
 
@@ -182,7 +188,7 @@ func (h *MessageHandler) fillAssetMimeFromStorage(ctx context.Context, botID str
 	}
 	for i := range messages {
 		for j := range messages[i].Assets {
-			a := &messages[i].Assets[j]
+			a := &messages[i].Assets[j] //nolint:gosec // G602: j is bounded by range loop
 			if strings.TrimSpace(a.ContentHash) == "" {
 				continue
 			}

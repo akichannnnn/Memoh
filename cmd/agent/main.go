@@ -24,18 +24,22 @@ import (
 	"github.com/memohai/memoh/internal/accounts"
 	"github.com/memohai/memoh/internal/acl"
 	agentpkg "github.com/memohai/memoh/internal/agent"
+	"github.com/memohai/memoh/internal/agent/background"
 	agenttools "github.com/memohai/memoh/internal/agent/tools"
 	"github.com/memohai/memoh/internal/bind"
 	"github.com/memohai/memoh/internal/boot"
 	"github.com/memohai/memoh/internal/bots"
 	"github.com/memohai/memoh/internal/browsercontexts"
 	"github.com/memohai/memoh/internal/channel"
+	"github.com/memohai/memoh/internal/channel/adapters/dingtalk"
 	"github.com/memohai/memoh/internal/channel/adapters/discord"
 	"github.com/memohai/memoh/internal/channel/adapters/feishu"
 	"github.com/memohai/memoh/internal/channel/adapters/local"
 	"github.com/memohai/memoh/internal/channel/adapters/matrix"
+	"github.com/memohai/memoh/internal/channel/adapters/misskey"
 	"github.com/memohai/memoh/internal/channel/adapters/qq"
 	"github.com/memohai/memoh/internal/channel/adapters/telegram"
+	"github.com/memohai/memoh/internal/channel/adapters/wechatoa"
 	"github.com/memohai/memoh/internal/channel/adapters/wecom"
 	"github.com/memohai/memoh/internal/channel/adapters/weixin"
 	"github.com/memohai/memoh/internal/channel/identities"
@@ -227,6 +231,7 @@ func runServe() {
 			provideContainerdHandler,
 			provideFederationGateway,
 			provideToolGatewayService,
+			provideBackgroundManager,
 			provideToolProviders,
 
 			// http handlers (group:"server_handlers")
@@ -247,7 +252,7 @@ func runServe() {
 			provideServerHandler(handlers.NewHeartbeatHandler),
 			provideServerHandler(handlers.NewCompactionHandler),
 			provideServerHandler(handlers.NewChannelHandler),
-			provideServerHandler(feishu.NewWebhookServerHandler),
+			provideServerHandler(channel.NewWebhookServerHandler),
 			provideServerHandler(weixin.NewQRServerHandler),
 			provideServerHandler(provideUsersHandler),
 			provideServerHandler(handlers.NewMemoryProvidersHandler),
@@ -277,9 +282,11 @@ func runServe() {
 
 			startScheduleService,
 			startHeartbeatService,
+			wireResolverOutbound,
 			startChannelManager,
 			startEmailManager,
 			startContainerReconciliation,
+			startBackgroundTaskCleanup,
 			startTtsTempStoreCleanup,
 			startServer,
 		),
@@ -359,12 +366,13 @@ func provideWorkspaceManager(log *slog.Logger, service ctr.Service, cfg config.C
 // memory providers
 // ---------------------------------------------------------------------------
 
-func provideMemoryLLM(modelsService *models.Service, queries *dbsqlc.Queries, log *slog.Logger) memprovider.LLM {
+func provideMemoryLLM(modelsService *models.Service, settingsService *settings.Service, queries *dbsqlc.Queries, log *slog.Logger) memprovider.LLM {
 	return &lazyLLMClient{
-		modelsService: modelsService,
-		queries:       queries,
-		timeout:       30 * time.Second,
-		logger:        log,
+		modelsService:   modelsService,
+		settingsService: settingsService,
+		queries:         queries,
+		timeout:         30 * time.Second,
+		logger:          log,
 	}
 }
 
@@ -482,15 +490,20 @@ func injectToolProviders(a *agentpkg.Agent, msgService *message.DBService, provi
 	}
 }
 
-func provideChatResolver(log *slog.Logger, a *agentpkg.Agent, modelsService *models.Service, queries *dbsqlc.Queries, chatService *conversation.Service, msgService *message.DBService, settingsService *settings.Service, accountService *accounts.Service, mediaService *media.Service, containerdHandler *handlers.ContainerdHandler, memoryRegistry *memprovider.Registry, sessionService *sessionpkg.Service, eventHub *event.Hub, compactionService *compaction.Service, pipeline *pipelinepkg.Pipeline, rc *boot.RuntimeConfig) *flow.Resolver {
+func provideChatResolver(log *slog.Logger, a *agentpkg.Agent, modelsService *models.Service, queries *dbsqlc.Queries, chatService *conversation.Service, msgService *message.DBService, settingsService *settings.Service, accountService *accounts.Service, mediaService *media.Service, containerdHandler *handlers.ContainerdHandler, memoryRegistry *memprovider.Registry, routeService *route.DBService, sessionService *sessionpkg.Service, eventHub *event.Hub, compactionService *compaction.Service, pipeline *pipelinepkg.Pipeline, rc *boot.RuntimeConfig, bgManager *background.Manager) *flow.Resolver {
 	resolver := flow.NewResolver(log, modelsService, queries, chatService, msgService, settingsService, accountService, a, rc.TimezoneLocation, 120*time.Second)
 	resolver.SetMemoryRegistry(memoryRegistry)
 	resolver.SetSkillLoader(&skillLoaderAdapter{handler: containerdHandler})
 	resolver.SetGatewayAssetLoader(&gatewayAssetLoaderAdapter{media: mediaService})
+	resolver.SetRouteService(routeService)
 	resolver.SetSessionService(sessionService)
 	resolver.SetEventPublisher(eventHub)
 	resolver.SetCompactionService(compactionService)
 	resolver.SetPipeline(pipeline)
+	resolver.SetBackgroundManager(bgManager)
+	bgManager.SetWakeFunc(func(botID, sessionID string) {
+		resolver.TriggerBackgroundNotification(context.Background(), botID, sessionID)
+	})
 	return resolver
 }
 
@@ -522,10 +535,17 @@ func provideChannelRegistry(log *slog.Logger, hub *local.RouteHub, mediaService 
 	feishuAdapter.SetAssetOpener(mediaService)
 	registry.MustRegister(feishuAdapter)
 	registry.MustRegister(wecom.NewWeComAdapter(log))
+	dingTalkAdapter := dingtalk.NewDingTalkAdapter(log)
+	registry.MustRegister(dingTalkAdapter)
+	registry.MustRegister(wechatoa.NewWeChatOAAdapter(log))
 	weixinAdapter := weixin.NewWeixinAdapter(log)
 	weixinAdapter.SetAssetOpener(mediaService)
 	registry.MustRegister(weixinAdapter)
 	registry.MustRegister(local.NewWebAdapter(hub))
+
+	// Misskey
+	registry.MustRegister(misskey.NewMisskeyAdapter(log))
+
 	return registry
 }
 
@@ -599,19 +619,21 @@ func provideChannelRouter(
 		emailOutboxService,
 		heartbeatService,
 		queries,
+		aclService,
 		&commandSkillLoaderAdapter{handler: containerdHandler},
 		&commandContainerFSAdapter{manager: manager},
 	))
 	return processor
 }
 
-func provideChannelManager(log *slog.Logger, registry *channel.Registry, channelStore *channel.Store, channelRouter *inbound.ChannelInboundProcessor) *channel.Manager {
+func provideChannelManager(log *slog.Logger, registry *channel.Registry, channelStore *channel.Store, channelRouter *inbound.ChannelInboundProcessor, mediaService *media.Service) *channel.Manager {
 	if adapter, ok := registry.Get(matrix.Type); ok {
 		if matrixAdapter, ok := adapter.(*matrix.MatrixAdapter); ok {
 			matrixAdapter.SetSyncStateSaver(channelStore.SaveMatrixSyncSinceToken)
 		}
 	}
 	mgr := channel.NewManager(log, registry, channelStore, channelRouter)
+	mgr.SetAttachmentStore(mediaService)
 	if mw := channelRouter.IdentityMiddleware(); mw != nil {
 		mgr.Use(mw)
 	}
@@ -656,7 +678,11 @@ func provideToolGatewayService(log *slog.Logger, fedGateway *handlers.MCPFederat
 	return svc
 }
 
-func provideToolProviders(log *slog.Logger, cfg config.Config, channelManager *channel.Manager, registry *channel.Registry, routeService *route.DBService, scheduleService *schedule.Service, settingsService *settings.Service, searchProviderService *searchproviders.Service, manager *workspace.Manager, mediaService *media.Service, memoryRegistry *memprovider.Registry, emailService *emailpkg.Service, emailManager *emailpkg.Manager, fedGateway *handlers.MCPFederationGateway, mcpConnService *mcp.ConnectionService, modelsService *models.Service, browserContextService *browsercontexts.Service, queries *dbsqlc.Queries, ttsService *ttspkg.Service, sessionService *sessionpkg.Service) []agenttools.ToolProvider {
+func provideBackgroundManager(log *slog.Logger) *background.Manager {
+	return background.New(log)
+}
+
+func provideToolProviders(log *slog.Logger, cfg config.Config, channelManager *channel.Manager, registry *channel.Registry, routeService *route.DBService, scheduleService *schedule.Service, settingsService *settings.Service, searchProviderService *searchproviders.Service, manager *workspace.Manager, mediaService *media.Service, memoryRegistry *memprovider.Registry, emailService *emailpkg.Service, emailManager *emailpkg.Manager, fedGateway *handlers.MCPFederationGateway, mcpConnService *mcp.ConnectionService, modelsService *models.Service, browserContextService *browsercontexts.Service, queries *dbsqlc.Queries, ttsService *ttspkg.Service, sessionService *sessionpkg.Service, bgManager *background.Manager) []agenttools.ToolProvider {
 	var assetResolver messaging.AssetResolver
 	if mediaService != nil {
 		assetResolver = &mediaAssetResolverAdapter{media: mediaService}
@@ -668,7 +694,7 @@ func provideToolProviders(log *slog.Logger, cfg config.Config, channelManager *c
 		agenttools.NewScheduleProvider(log, scheduleService),
 		agenttools.NewMemoryProvider(log, memoryRegistry, settingsService),
 		agenttools.NewWebProvider(log, settingsService, searchProviderService),
-		agenttools.NewContainerProvider(log, manager, config.DefaultDataMount),
+		agenttools.NewContainerProvider(log, manager, bgManager, config.DefaultDataMount),
 		agenttools.NewEmailProvider(log, emailService, emailManager),
 		agenttools.NewWebFetchProvider(log),
 		agenttools.NewSpawnProvider(log, settingsService, modelsService, queries, sessionService),
@@ -758,6 +784,20 @@ func startTtsTempStoreCleanup(lc fx.Lifecycle, store *ttspkg.TempStore) {
 	})
 }
 
+func startBackgroundTaskCleanup(lc fx.Lifecycle, mgr *background.Manager) {
+	done := make(chan struct{})
+	lc.Append(fx.Hook{
+		OnStart: func(_ context.Context) error {
+			go mgr.StartCleanupLoop(done, background.DefaultCleanupInterval, background.DefaultTaskRetention)
+			return nil
+		},
+		OnStop: func(_ context.Context) error {
+			close(done)
+			return nil
+		},
+	})
+}
+
 // settingsTtsModelResolver adapts settings.Service to the ttsModelResolver interface
 // expected by ChannelInboundProcessor and LocalChannelHandler.
 // sessionEnsurerAdapter adapts session.Service to the inbound sessionEnsurer interface.
@@ -767,6 +807,14 @@ type sessionEnsurerAdapter struct {
 
 func (a *sessionEnsurerAdapter) EnsureActiveSession(ctx context.Context, botID, routeID, channelType string) (inbound.SessionResult, error) {
 	sess, err := a.svc.EnsureActiveSession(ctx, botID, routeID, channelType)
+	if err != nil {
+		return inbound.SessionResult{}, err
+	}
+	return inbound.SessionResult{ID: sess.ID, Type: sess.Type}, nil
+}
+
+func (a *sessionEnsurerAdapter) GetActiveSession(ctx context.Context, routeID string) (inbound.SessionResult, error) {
+	sess, err := a.svc.GetActiveForRoute(ctx, routeID)
 	if err != nil {
 		return inbound.SessionResult{}, err
 	}
@@ -937,6 +985,15 @@ func startHeartbeatService(lc fx.Lifecycle, heartbeatService *heartbeat.Service)
 	})
 }
 
+func wireResolverOutbound(resolver *flow.Resolver, channelManager *channel.Manager) {
+	resolver.SetOutboundFn(func(ctx context.Context, botID, channelType, target, text string) error {
+		return channelManager.Send(ctx, botID, channel.ChannelType(channelType), channel.SendRequest{
+			Target:  target,
+			Message: channel.Message{Text: text},
+		})
+	})
+}
+
 func startChannelManager(lc fx.Lifecycle, channelManager *channel.Manager) {
 	ctx, cancel := context.WithCancel(context.Background())
 	lc.Append(fx.Hook{
@@ -1069,14 +1126,15 @@ func ensureAdminUser(ctx context.Context, log *slog.Logger, queries *dbsqlc.Quer
 // ---------------------------------------------------------------------------
 
 type lazyLLMClient struct {
-	modelsService *models.Service
-	queries       *dbsqlc.Queries
-	timeout       time.Duration
-	logger        *slog.Logger
+	modelsService   *models.Service
+	settingsService *settings.Service
+	queries         *dbsqlc.Queries
+	timeout         time.Duration
+	logger          *slog.Logger
 }
 
 func (c *lazyLLMClient) Extract(ctx context.Context, req memprovider.ExtractRequest) (memprovider.ExtractResponse, error) {
-	client, err := c.resolve(ctx)
+	client, err := c.resolve(ctx, req.BotID)
 	if err != nil {
 		return memprovider.ExtractResponse{}, err
 	}
@@ -1084,7 +1142,7 @@ func (c *lazyLLMClient) Extract(ctx context.Context, req memprovider.ExtractRequ
 }
 
 func (c *lazyLLMClient) Decide(ctx context.Context, req memprovider.DecideRequest) (memprovider.DecideResponse, error) {
-	client, err := c.resolve(ctx)
+	client, err := c.resolve(ctx, req.BotID)
 	if err != nil {
 		return memprovider.DecideResponse{}, err
 	}
@@ -1092,7 +1150,7 @@ func (c *lazyLLMClient) Decide(ctx context.Context, req memprovider.DecideReques
 }
 
 func (c *lazyLLMClient) Compact(ctx context.Context, req memprovider.CompactRequest) (memprovider.CompactResponse, error) {
-	client, err := c.resolve(ctx)
+	client, err := c.resolve(ctx, "")
 	if err != nil {
 		return memprovider.CompactResponse{}, err
 	}
@@ -1100,18 +1158,32 @@ func (c *lazyLLMClient) Compact(ctx context.Context, req memprovider.CompactRequ
 }
 
 func (c *lazyLLMClient) DetectLanguage(ctx context.Context, text string) (string, error) {
-	client, err := c.resolve(ctx)
+	client, err := c.resolve(ctx, "")
 	if err != nil {
 		return "", err
 	}
 	return client.DetectLanguage(ctx, text)
 }
 
-func (c *lazyLLMClient) resolve(ctx context.Context) (memprovider.LLM, error) {
+func (c *lazyLLMClient) resolve(ctx context.Context, botID string) (memprovider.LLM, error) {
 	if c.modelsService == nil || c.queries == nil {
 		return nil, errors.New("models service not configured")
 	}
-	memoryModel, memoryProvider, err := models.SelectMemoryModelForBot(ctx, c.modelsService, c.queries, "")
+
+	// Try to use the bot's configured chat model for memory operations.
+	chatModelID := ""
+	if c.settingsService != nil && strings.TrimSpace(botID) != "" {
+		if botSettings, err := c.settingsService.GetBot(ctx, botID); err == nil {
+			// Prefer compaction model (smaller/cheaper), then chat model.
+			if id := strings.TrimSpace(botSettings.CompactionModelID); id != "" {
+				chatModelID = id
+			} else if id := strings.TrimSpace(botSettings.ChatModelID); id != "" {
+				chatModelID = id
+			}
+		}
+	}
+
+	memoryModel, memoryProvider, err := models.SelectMemoryModelForBot(ctx, c.modelsService, c.queries, chatModelID)
 	if err != nil {
 		return nil, err
 	}
@@ -1151,36 +1223,46 @@ type mediaAssetResolverAdapter struct {
 	media *media.Service
 }
 
+func (a *mediaAssetResolverAdapter) Stat(ctx context.Context, botID, contentHash string) (media.Asset, error) {
+	if a == nil || a.media == nil {
+		return media.Asset{}, errors.New("media service not configured")
+	}
+	return a.media.Stat(ctx, botID, contentHash)
+}
+
+func (a *mediaAssetResolverAdapter) Open(ctx context.Context, botID, contentHash string) (io.ReadCloser, media.Asset, error) {
+	if a == nil || a.media == nil {
+		return nil, media.Asset{}, errors.New("media service not configured")
+	}
+	return a.media.Open(ctx, botID, contentHash)
+}
+
+func (a *mediaAssetResolverAdapter) Ingest(ctx context.Context, input media.IngestInput) (media.Asset, error) {
+	if a == nil || a.media == nil {
+		return media.Asset{}, errors.New("media service not configured")
+	}
+	return a.media.Ingest(ctx, input)
+}
+
 func (a *mediaAssetResolverAdapter) GetByStorageKey(ctx context.Context, botID, storageKey string) (messaging.AssetMeta, error) {
 	if a == nil || a.media == nil {
 		return messaging.AssetMeta{}, errors.New("media service not configured")
 	}
-	asset, err := a.media.GetByStorageKey(ctx, botID, storageKey)
-	if err != nil {
-		return messaging.AssetMeta{}, err
+	return a.media.GetByStorageKey(ctx, botID, storageKey)
+}
+
+func (a *mediaAssetResolverAdapter) AccessPath(asset media.Asset) string {
+	if a == nil || a.media == nil {
+		return ""
 	}
-	return messaging.AssetMeta{
-		ContentHash: asset.ContentHash,
-		Mime:        asset.Mime,
-		SizeBytes:   asset.SizeBytes,
-		StorageKey:  asset.StorageKey,
-	}, nil
+	return a.media.AccessPath(asset)
 }
 
 func (a *mediaAssetResolverAdapter) IngestContainerFile(ctx context.Context, botID, containerPath string) (messaging.AssetMeta, error) {
 	if a == nil || a.media == nil {
 		return messaging.AssetMeta{}, errors.New("media service not configured")
 	}
-	asset, err := a.media.IngestContainerFile(ctx, botID, containerPath)
-	if err != nil {
-		return messaging.AssetMeta{}, err
-	}
-	return messaging.AssetMeta{
-		ContentHash: asset.ContentHash,
-		Mime:        asset.Mime,
-		SizeBytes:   asset.SizeBytes,
-		StorageKey:  asset.StorageKey,
-	}, nil
+	return a.media.IngestContainerFile(ctx, botID, containerPath)
 }
 
 // gatewayAssetLoaderAdapter bridges media service to flow gateway asset loader.

@@ -50,6 +50,7 @@ const llmProviders: string[] = [
   ...withVariants('siliconcloud', ['color']),
   ...withVariants('volcengine', ['color']),
   ...withVariants('newapi', ['color']),
+  ...withVariants('github-copilot', []),
 ]
 
 // ---------------------------------------------------------------------------
@@ -82,7 +83,10 @@ const channelPlatforms: string[] = [
   'slack',
   'feishu',
   'wechat',
+  'wechatoa',
+  'wecom',
   'matrix',
+  'dingtalk',
 ]
 
 // ---------------------------------------------------------------------------

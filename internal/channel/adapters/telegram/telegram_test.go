@@ -13,7 +13,6 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/memohai/memoh/internal/channel"
-	"github.com/memohai/memoh/internal/media"
 )
 
 func TestResolveTelegramSender(t *testing.T) {
@@ -259,6 +258,62 @@ func TestBuildTelegramMediaGroupInboundMessageAggregatesAttachments(t *testing.T
 	}
 }
 
+func TestBuildTelegramInboundMessageIncludesUpdateIDMetadata(t *testing.T) {
+	t.Parallel()
+
+	adapter := NewTelegramAdapter(nil)
+	bot := &tgbotapi.BotAPI{
+		Token: "test",
+		Self:  tgbotapi.User{ID: 1001, UserName: "memohbot"},
+	}
+	update := tgbotapi.Update{
+		UpdateID: 777,
+		Message: &tgbotapi.Message{
+			MessageID: 101,
+			Date:      1710000000,
+			Text:      "hello",
+			Chat:      &tgbotapi.Chat{ID: 123, Type: "private"},
+			From:      &tgbotapi.User{ID: 10, UserName: "alice"},
+		},
+	}
+
+	inbound, ok := adapter.buildTelegramInboundMessage(bot, channel.ChannelConfig{}, update)
+	if !ok {
+		t.Fatal("expected inbound message")
+	}
+	if got := inbound.Metadata["update_id"]; got != 777 {
+		t.Fatalf("unexpected update_id metadata: %#v", got)
+	}
+}
+
+func TestSeenTelegramUpdate(t *testing.T) {
+	t.Parallel()
+
+	adapter := NewTelegramAdapter(nil)
+	now := time.Unix(1710000000, 0)
+
+	if adapter.seenTelegramUpdate("cfg-1", 42, now) {
+		t.Fatal("first update should not be treated as duplicate")
+	}
+	if !adapter.seenTelegramUpdate("cfg-1", 42, now.Add(time.Second)) {
+		t.Fatal("second update should be treated as duplicate")
+	}
+	if adapter.seenTelegramUpdate("cfg-2", 42, now.Add(time.Second)) {
+		t.Fatal("same update_id under different config should not collide")
+	}
+	if adapter.seenTelegramUpdate("cfg-1", 43, now.Add(time.Second)) {
+		t.Fatal("different update_id should not collide")
+	}
+	if adapter.seenTelegramUpdate("cfg-1", 0, now.Add(time.Second)) {
+		t.Fatal("zero update_id should bypass dedupe")
+	}
+
+	later := now.Add(telegramUpdateDedupeTTL + time.Second)
+	if adapter.seenTelegramUpdate("cfg-1", 42, later) {
+		t.Fatal("expired dedupe entry should be accepted again")
+	}
+}
+
 func TestIsTelegramMediaGroupForChat(t *testing.T) {
 	t.Parallel()
 
@@ -477,6 +532,21 @@ func TestParseConfig_APIBaseURL(t *testing.T) {
 			t.Fatalf("expected empty APIBaseURL, got %q", cfg.APIBaseURL)
 		}
 	})
+
+	t.Run("http proxy config", func(t *testing.T) {
+		t.Parallel()
+		proxyURL := "http://memoh:" + "secret" + "@sztu.cc:3128"
+		cfg, err := parseConfig(map[string]any{
+			"botToken":     "t4",
+			"httpProxyUrl": proxyURL,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.HTTPProxy.URL != proxyURL {
+			t.Fatalf("unexpected httpProxyUrl: %q", cfg.HTTPProxy.URL)
+		}
+	})
 }
 
 func TestNormalizeConfig_APIBaseURL(t *testing.T) {
@@ -501,6 +571,21 @@ func TestNormalizeConfig_APIBaseURL(t *testing.T) {
 		}
 		if _, exists := norm["apiBaseURL"]; exists {
 			t.Fatalf("empty apiBaseURL should be omitted: %#v", norm)
+		}
+	})
+
+	t.Run("includes http proxy config", func(t *testing.T) {
+		t.Parallel()
+		proxyURL := "http://memoh:" + "secret" + "@sztu.cc:3128"
+		norm, err := normalizeConfig(map[string]any{
+			"botToken":     "t3",
+			"httpProxyUrl": proxyURL,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if norm["httpProxyUrl"] != proxyURL {
+			t.Fatalf("unexpected httpProxyUrl in output: %#v", norm)
 		}
 	})
 }
@@ -723,8 +808,11 @@ func TestProcessingFailed_DelegatesToCompleted(t *testing.T) {
 func TestResolveTelegramFile_PlatformKey(t *testing.T) {
 	t.Parallel()
 
-	att := channel.Attachment{Type: channel.AttachmentImage, PlatformKey: "file_id_123"}
-	file, err := resolveTelegramFile(context.Background(), "", "file_id_123", "", "", att, "", "", nil)
+	file, err := resolveTelegramFile(context.Background(), channel.PreparedAttachment{
+		Logical:   channel.Attachment{Type: channel.AttachmentImage},
+		Kind:      channel.PreparedAttachmentNativeRef,
+		NativeRef: "file_id_123",
+	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -736,8 +824,11 @@ func TestResolveTelegramFile_PlatformKey(t *testing.T) {
 func TestResolveTelegramFile_PublicURL(t *testing.T) {
 	t.Parallel()
 
-	att := channel.Attachment{Type: channel.AttachmentImage}
-	file, err := resolveTelegramFile(context.Background(), "https://example.com/img.png", "", "", "", att, "", "", nil)
+	file, err := resolveTelegramFile(context.Background(), channel.PreparedAttachment{
+		Logical:   channel.Attachment{Type: channel.AttachmentImage},
+		Kind:      channel.PreparedAttachmentPublicURL,
+		PublicURL: "https://example.com/img.png",
+	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -746,12 +837,18 @@ func TestResolveTelegramFile_PublicURL(t *testing.T) {
 	}
 }
 
-func TestResolveTelegramFile_DataURL(t *testing.T) {
+func TestResolveTelegramFile_Upload(t *testing.T) {
 	t.Parallel()
 
-	dataURL := "data:image/png;base64,iVBORw0KGgo="
-	att := channel.Attachment{Type: channel.AttachmentImage, Mime: "image/png", Name: "test.png"}
-	file, err := resolveTelegramFile(context.Background(), "", "", dataURL, "", att, "", "", nil)
+	file, err := resolveTelegramFile(context.Background(), channel.PreparedAttachment{
+		Logical: channel.Attachment{Type: channel.AttachmentImage},
+		Kind:    channel.PreparedAttachmentUpload,
+		Mime:    "image/png",
+		Name:    "test.png",
+		Open: func(context.Context) (io.ReadCloser, error) {
+			return io.NopCloser(strings.NewReader("png-bytes")), nil
+		},
+	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -762,80 +859,31 @@ func TestResolveTelegramFile_DataURL(t *testing.T) {
 	if fb.Name != "test.png" {
 		t.Fatalf("expected name test.png, got %q", fb.Name)
 	}
-	if len(fb.Bytes) == 0 {
-		t.Fatal("expected non-empty bytes")
+	if string(fb.Bytes) != "png-bytes" {
+		t.Fatalf("expected png-bytes, got %q", string(fb.Bytes))
 	}
 }
 
 func TestResolveTelegramFile_NoReference(t *testing.T) {
 	t.Parallel()
 
-	att := channel.Attachment{Type: channel.AttachmentImage}
-	_, err := resolveTelegramFile(context.Background(), "", "", "", "", att, "", "", nil)
+	_, err := resolveTelegramFile(context.Background(), channel.PreparedAttachment{
+		Logical: channel.Attachment{Type: channel.AttachmentImage},
+	})
 	if err == nil {
 		t.Fatal("expected error when no reference available")
 	}
 }
 
-func TestResolveTelegramFile_ContainerPathFallsToBase64(t *testing.T) {
+func TestResolveTelegramFile_UploadRequiresOpen(t *testing.T) {
 	t.Parallel()
 
-	dataURL := "data:image/jpeg;base64,/9j/4AAQ"
-	att := channel.Attachment{Type: channel.AttachmentImage, Mime: "image/jpeg"}
-	file, err := resolveTelegramFile(context.Background(), "/data/media/image/a.jpg", "", dataURL, "", att, "", "", nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if _, ok := file.(tgbotapi.FileBytes); !ok {
-		t.Fatalf("expected FileBytes for container path + base64, got %T", file)
-	}
-}
-
-type mockAssetOpener struct {
-	data []byte
-	mime string
-}
-
-func (m *mockAssetOpener) Open(_ context.Context, _, _ string) (io.ReadCloser, media.Asset, error) {
-	return io.NopCloser(strings.NewReader(string(m.data))), media.Asset{Mime: m.mime}, nil
-}
-
-func TestResolveTelegramFile_ContentHash(t *testing.T) {
-	t.Parallel()
-
-	opener := &mockAssetOpener{data: []byte("fake-png-bytes"), mime: "image/png"}
-	att := channel.Attachment{Type: channel.AttachmentImage, ContentHash: "asset-123", Name: "output.png"}
-	file, err := resolveTelegramFile(context.Background(), "", "", "", "", att, "asset-123", "bot-1", opener)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	fb, ok := file.(tgbotapi.FileBytes)
-	if !ok {
-		t.Fatalf("expected FileBytes from asset reader, got %T", file)
-	}
-	if fb.Name != "output.png" {
-		t.Fatalf("expected name output.png, got %q", fb.Name)
-	}
-	if string(fb.Bytes) != "fake-png-bytes" {
-		t.Fatalf("expected fake-png-bytes, got %q", string(fb.Bytes))
-	}
-}
-
-func TestResolveTelegramFile_ContentHashPriorityOverURL(t *testing.T) {
-	t.Parallel()
-
-	opener := &mockAssetOpener{data: []byte("from-storage"), mime: "image/jpeg"}
-	att := channel.Attachment{Type: channel.AttachmentImage, ContentHash: "a1"}
-	file, err := resolveTelegramFile(context.Background(), "https://example.com/fallback.jpg", "", "", "", att, "a1", "bot-1", opener)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	fb, ok := file.(tgbotapi.FileBytes)
-	if !ok {
-		t.Fatalf("expected FileBytes (asset priority over URL), got %T", file)
-	}
-	if string(fb.Bytes) != "from-storage" {
-		t.Fatalf("expected from-storage, got %q", string(fb.Bytes))
+	_, err := resolveTelegramFile(context.Background(), channel.PreparedAttachment{
+		Logical: channel.Attachment{Type: channel.AttachmentImage},
+		Kind:    channel.PreparedAttachmentUpload,
+	})
+	if err == nil {
+		t.Fatal("expected missing upload opener to fail")
 	}
 }
 
