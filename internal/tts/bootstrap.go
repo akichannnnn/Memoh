@@ -34,32 +34,34 @@ func SyncRegistry(ctx context.Context, logger *slog.Logger, queries *sqlc.Querie
 		}
 
 		synced := 0
-		for _, model := range def.Models {
-			if shouldHideTemplateModel(def, models.ModelTypeSpeech, model.ID) {
-				if err := queries.DeleteModelByProviderAndType(ctx, sqlc.DeleteModelByProviderAndTypeParams{
-					ProviderID: provider.ID,
-					ModelID:    model.ID,
-					Type:       string(models.ModelTypeSpeech),
-				}); err != nil {
-					return fmt.Errorf("delete hidden speech template model %s: %w", model.ID, err)
+		if !isTranscriptionClientType(def.ClientType) {
+			for _, model := range def.Models {
+				if shouldHideTemplateModel(def, models.ModelTypeSpeech, model.ID) {
+					if err := queries.DeleteModelByProviderAndType(ctx, sqlc.DeleteModelByProviderAndTypeParams{
+						ProviderID: provider.ID,
+						ModelID:    model.ID,
+						Type:       string(models.ModelTypeSpeech),
+					}); err != nil {
+						return fmt.Errorf("delete hidden speech template model %s: %w", model.ID, err)
+					}
+					continue
 				}
-				continue
+				modelConfigJSON, err := json.Marshal(map[string]any{})
+				if err != nil {
+					return fmt.Errorf("marshal speech model config: %w", err)
+				}
+				name := pgtype.Text{String: model.Name, Valid: model.Name != ""}
+				if _, err := queries.UpsertRegistryModel(ctx, sqlc.UpsertRegistryModelParams{
+					ModelID:    model.ID,
+					Name:       name,
+					ProviderID: provider.ID,
+					Type:       string(models.ModelTypeSpeech),
+					Config:     modelConfigJSON,
+				}); err != nil {
+					return fmt.Errorf("upsert speech model %s: %w", model.ID, err)
+				}
+				synced++
 			}
-			modelConfigJSON, err := json.Marshal(map[string]any{})
-			if err != nil {
-				return fmt.Errorf("marshal speech model config: %w", err)
-			}
-			name := pgtype.Text{String: model.Name, Valid: model.Name != ""}
-			if _, err := queries.UpsertRegistryModel(ctx, sqlc.UpsertRegistryModelParams{
-				ModelID:    model.ID,
-				Name:       name,
-				ProviderID: provider.ID,
-				Type:       string(models.ModelTypeSpeech),
-				Config:     modelConfigJSON,
-			}); err != nil {
-				return fmt.Errorf("upsert speech model %s: %w", model.ID, err)
-			}
-			synced++
 		}
 		for _, model := range def.TranscriptionModels {
 			if shouldHideTemplateModel(def, models.ModelTypeTranscription, model.ID) {

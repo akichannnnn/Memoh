@@ -34,11 +34,16 @@ func (h *SpeechHandler) Register(e *echo.Echo) {
 	pg := e.Group("/speech-providers")
 	pg.GET("", h.ListProviders)
 	pg.GET("/:id", h.GetProvider)
-	pg.GET("/meta", h.ListMeta)
+	pg.GET("/meta", h.ListSpeechMeta)
 	pg.GET("/:id/models", h.ListModelsByProvider)
 	pg.POST("/:id/import-models", h.ImportModels)
-	pg.GET("/:id/transcription-models", h.ListTranscriptionModelsByProvider)
-	pg.POST("/:id/import-transcription-models", h.ImportTranscriptionModels)
+
+	tpg := e.Group("/transcription-providers")
+	tpg.GET("", h.ListTranscriptionProviders)
+	tpg.GET("/meta", h.ListTranscriptionMeta)
+	tpg.GET("/:id", h.GetProvider)
+	tpg.GET("/:id/models", h.ListTranscriptionModelsByProvider)
+	tpg.POST("/:id/import-models", h.ImportTranscriptionModels)
 
 	mg := e.Group("/speech-models")
 	mg.GET("", h.ListModels)
@@ -61,8 +66,12 @@ func (h *SpeechHandler) Register(e *echo.Echo) {
 // @Tags speech-providers
 // @Success 200 {array} tts.ProviderMetaResponse
 // @Router /speech-providers/meta [get].
-func (h *SpeechHandler) ListMeta(c echo.Context) error {
-	return c.JSON(http.StatusOK, h.service.ListMeta(c.Request().Context()))
+func (h *SpeechHandler) ListSpeechMeta(c echo.Context) error {
+	return c.JSON(http.StatusOK, h.service.ListSpeechMeta(c.Request().Context()))
+}
+
+func (h *SpeechHandler) ListTranscriptionMeta(c echo.Context) error {
+	return c.JSON(http.StatusOK, h.service.ListTranscriptionMeta(c.Request().Context()))
 }
 
 // ListProviders godoc
@@ -75,6 +84,14 @@ func (h *SpeechHandler) ListMeta(c echo.Context) error {
 // @Router /speech-providers [get].
 func (h *SpeechHandler) ListProviders(c echo.Context) error {
 	items, err := h.service.ListSpeechProviders(c.Request().Context())
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
+	}
+	return c.JSON(http.StatusOK, items)
+}
+
+func (h *SpeechHandler) ListTranscriptionProviders(c echo.Context) error {
+	items, err := h.service.ListTranscriptionProviders(c.Request().Context())
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, err.Error())
 	}

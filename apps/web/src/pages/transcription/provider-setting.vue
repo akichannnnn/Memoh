@@ -40,9 +40,9 @@
       @submit.prevent="handleSaveProvider"
     >
       <section class="space-y-2">
-        <Label for="speech-provider-name">{{ $t('common.name') }}</Label>
+        <Label for="transcription-provider-name">{{ $t('common.name') }}</Label>
         <Input
-          id="speech-provider-name"
+          id="transcription-provider-name"
           v-model="providerName"
           type="text"
           :placeholder="$t('common.namePlaceholder')"
@@ -54,7 +54,7 @@
         :key="field.key"
         class="space-y-2"
       >
-        <Label :for="field.type === 'bool' || field.type === 'enum' ? undefined : `speech-provider-${field.key}`">
+        <Label :for="field.type === 'bool' || field.type === 'enum' ? undefined : `transcription-provider-${field.key}`">
           {{ field.title || field.key }}
         </Label>
         <p
@@ -68,10 +68,9 @@
           class="relative"
         >
           <Input
-            :id="`speech-provider-${field.key}`"
+            :id="`transcription-provider-${field.key}`"
             v-model="providerConfig[field.key] as string"
             :type="visibleSecrets[field.key] ? 'text' : 'password'"
-            :placeholder="field.example ? String(field.example) : ''"
           />
           <button
             type="button"
@@ -91,10 +90,9 @@
         />
         <Input
           v-else-if="field.type === 'number'"
-          :id="`speech-provider-${field.key}`"
+          :id="`transcription-provider-${field.key}`"
           v-model.number="providerConfig[field.key] as number"
           type="number"
-          :placeholder="field.example ? String(field.example) : ''"
         />
         <Select
           v-else-if="field.type === 'enum' && field.enum"
@@ -116,10 +114,9 @@
         </Select>
         <Input
           v-else
-          :id="`speech-provider-${field.key}`"
+          :id="`transcription-provider-${field.key}`"
           v-model="providerConfig[field.key] as string"
           type="text"
-          :placeholder="field.example ? String(field.example) : ''"
         />
       </section>
 
@@ -138,7 +135,7 @@
     <section>
       <div class="flex justify-between items-center mb-4">
         <h3 class="text-xs font-medium">
-          {{ $t('speech.synthesis.models') }}
+          {{ $t('speech.transcription.models') }}
         </h3>
         <div
           v-if="curProviderId"
@@ -151,14 +148,14 @@
             :loading="importLoading"
             @click="handleImportModels"
           >
-            {{ $t('speech.importModels') }}
+            {{ $t('speech.transcription.importModels') }}
           </LoadingButton>
           <CreateModel
             :id="curProviderId"
-            default-type="speech"
+            default-type="transcription"
             hide-type
-            :type-options="speechTypeOptions"
-            :invalidate-keys="['speech-provider-models', 'speech-models']"
+            :type-options="transcriptionTypeOptions"
+            :invalidate-keys="['transcription-provider-models', 'transcription-models']"
           />
         </div>
       </div>
@@ -167,7 +164,7 @@
         v-if="providerModels.length === 0"
         class="text-xs text-muted-foreground py-4 text-center"
       >
-        {{ $t('speech.noModels') }}
+        {{ $t('speech.transcription.noModels') }}
       </div>
 
       <div
@@ -185,14 +182,15 @@
             <span
               v-if="model.name"
               class="text-xs text-muted-foreground ml-2"
-            >{{ model.model_id }}</span>
+            >
+              {{ model.model_id }}
+            </span>
           </div>
           <component
             :is="expandedModelId === model.id ? ChevronUp : ChevronDown"
             class="size-3 text-muted-foreground"
           />
         </button>
-
         <div
           v-if="expandedModelId === model.id"
           class="px-3 pb-3 space-y-4 border-t border-border pt-3"
@@ -202,7 +200,8 @@
             :model-name="model.model_id ?? ''"
             :config="model.config || {}"
             :schema="getModelSchema(model.model_id ?? '')"
-            :on-test="(text, cfg) => handleTestModel(model.id ?? '', text as string, cfg)"
+            mode="transcription"
+            :on-test="(file, cfg) => handleTestModel(model.id ?? '', file as File, cfg)"
             @save="(cfg) => handleSaveModel(model.id ?? '', cfg)"
           />
         </div>
@@ -212,64 +211,30 @@
 </template>
 
 <script setup lang="ts">
-import {
-  Input,
-  Label,
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-  Separator,
-  Switch,
-} from '@memohai/ui'
-import ModelConfigEditor from './model-config-editor.vue'
-import { ChevronDown, ChevronUp, Eye, EyeOff } from 'lucide-vue-next'
 import { computed, inject, reactive, ref, watch } from 'vue'
+import { useQuery, useQueryCache } from '@pinia/colada'
 import { toast } from 'vue-sonner'
 import { useI18n } from 'vue-i18n'
-import { useQuery, useQueryCache } from '@pinia/colada'
-import { getSpeechProvidersById, getSpeechProvidersByIdModels, getSpeechProvidersMeta, postSpeechProvidersByIdImportModels, putProvidersById } from '@memohai/sdk'
+import { client } from '@memohai/sdk/client'
 import type { TtsSpeechModelResponse, TtsSpeechProviderResponse } from '@memohai/sdk'
-import LoadingButton from '@/components/loading-button/index.vue'
+import { putProvidersById } from '@memohai/sdk'
+import { ChevronDown, ChevronUp, Eye, EyeOff } from 'lucide-vue-next'
+import { Input, Label, Select, SelectContent, SelectItem, SelectTrigger, SelectValue, Separator, Switch } from '@memohai/ui'
 import ProviderIcon from '@/components/provider-icon/index.vue'
+import LoadingButton from '@/components/loading-button/index.vue'
+import ModelConfigEditor from '@/pages/speech/components/model-config-editor.vue'
 import CreateModel from '@/components/create-model/index.vue'
 
-interface SpeechFieldSchema {
-  key: string
-  type: string
-  title?: string
-  description?: string
-  required?: boolean
-  advanced?: boolean
-  enum?: string[]
-  example?: unknown
-  order?: number
-}
-
-interface SpeechConfigSchema {
-  fields?: SpeechFieldSchema[]
-}
-
-interface SpeechModelMeta {
-  id: string
-  name: string
-  description?: string
-  config_schema?: SpeechConfigSchema
-  capabilities?: {
-    config_schema?: SpeechConfigSchema
-  }
-}
-
-interface SpeechProviderMeta {
+interface FieldSchema { key: string, type: string, title?: string, description?: string, enum?: string[], order?: number }
+interface ConfigSchema { fields?: FieldSchema[] }
+interface ModelMeta { id: string, name: string, config_schema?: ConfigSchema, capabilities?: { config_schema?: ConfigSchema } }
+interface ProviderMeta {
   provider: string
   display_name: string
-  description?: string
-  config_schema?: SpeechConfigSchema
-  default_model?: string
-  models?: SpeechModelMeta[]
-  default_synthesis_model?: string
-  synthesis_models?: SpeechModelMeta[]
+  config_schema?: ConfigSchema
+  default_transcription_model?: string
+  transcription_models?: ModelMeta[]
+  models?: ModelMeta[]
 }
 
 function getInitials(name: string | undefined) {
@@ -288,53 +253,40 @@ const enableLoading = ref(false)
 const saveLoading = ref(false)
 const importLoading = ref(false)
 const queryCache = useQueryCache()
-const speechTypeOptions = [
-  { value: 'speech', label: 'Speech' },
+const transcriptionTypeOptions = [
+  { value: 'transcription', label: 'Transcription' },
 ]
 
 const { data: providerDetail } = useQuery({
-  key: () => ['speech-provider-detail', curProviderId.value],
+  key: () => ['transcription-provider-detail', curProviderId.value],
   query: async () => {
     if (!curProviderId.value) return null
-    const { data } = await getSpeechProvidersById({
-      path: { id: curProviderId.value },
-      throwOnError: true,
-    })
-    return data ?? null
+    const { data } = await client.get({ url: `/transcription-providers/${curProviderId.value}` })
+    return (data ?? null) as TtsSpeechProviderResponse | null
   },
 })
 
 const { data: metaList } = useQuery({
-  key: () => ['speech-providers-meta'],
+  key: () => ['transcription-providers-meta'],
   query: async () => {
-    const { data } = await getSpeechProvidersMeta({ throwOnError: true })
-    return (data ?? []) as SpeechProviderMeta[]
+    const { data } = await client.get({ url: '/transcription-providers/meta' })
+    return (data ?? []) as ProviderMeta[]
   },
 })
 
-const currentMeta = computed(() => {
-  if (!metaList.value || !curProvider.value?.client_type) return null
-  return (metaList.value as SpeechProviderMeta[]).find(m => m.provider === curProvider.value?.client_type) ?? null
-})
+const currentMeta = computed(() => (metaList.value ?? []).find(m => m.provider === curProvider.value?.client_type) ?? null)
+const orderedProviderFields = computed(() => [...(currentMeta.value?.config_schema?.fields ?? [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0)))
 
-const orderedProviderFields = computed(() => {
-  const fields = currentMeta.value?.config_schema?.fields ?? []
-  return [...fields].sort((a, b) => (a.order ?? 0) - (b.order ?? 0))
-})
-
-const { data: providerSpeechModels } = useQuery({
-  key: () => ['speech-provider-models', curProviderId.value],
+const { data: providerModelData } = useQuery({
+  key: () => ['transcription-provider-models', curProviderId.value],
   query: async () => {
     if (!curProviderId.value) return []
-    const { data } = await getSpeechProvidersByIdModels({
-      path: { id: curProviderId.value },
-      throwOnError: true,
-    })
-    return data ?? []
+    const { data } = await client.get({ url: `/transcription-providers/${curProviderId.value}/models` })
+    return (data ?? []) as TtsSpeechModelResponse[]
   },
 })
 
-const providerModels = computed(() => ((providerSpeechModels.value as TtsSpeechModelResponse[] | undefined) ?? []))
+const providerModels = computed(() => providerModelData.value ?? [])
 
 watch(() => providerDetail.value, (provider) => {
   providerName.value = provider?.name ?? curProvider.value?.name ?? ''
@@ -342,18 +294,11 @@ watch(() => providerDetail.value, (provider) => {
   Object.assign(providerConfig, { ...(provider?.config ?? {}) })
 }, { immediate: true, deep: true })
 
-function getModelMeta(modelID: string): SpeechModelMeta | null {
-  const models = currentMeta.value?.synthesis_models ?? currentMeta.value?.models ?? []
+function getModelSchema(modelID: string): ConfigSchema | null {
+  const models = currentMeta.value?.transcription_models ?? currentMeta.value?.models ?? []
   const exact = models.find(m => m.id === modelID)
-  if (exact) return exact
-  const defaultModel = currentMeta.value?.default_synthesis_model ?? currentMeta.value?.default_model
-  if (defaultModel) return models.find(m => m.id === defaultModel) ?? null
-  return models[0] ?? null
-}
-
-function getModelSchema(modelID: string): SpeechConfigSchema | null {
-  const meta = getModelMeta(modelID)
-  return meta?.config_schema ?? meta?.capabilities?.config_schema ?? null
+  const fallback = exact ?? models.find(m => m.id === currentMeta.value?.default_transcription_model) ?? models[0]
+  return fallback?.config_schema ?? fallback?.capabilities?.config_schema ?? null
 }
 
 function toggleModel(id: string) {
@@ -364,7 +309,6 @@ async function handleToggleEnable(value: boolean) {
   if (!curProviderId.value || !curProvider.value) return
   const prev = curProvider.value.enable ?? false
   curProvider.value = { ...curProvider.value, enable: value }
-
   enableLoading.value = true
   try {
     await putProvidersById({
@@ -377,8 +321,8 @@ async function handleToggleEnable(value: boolean) {
       },
       throwOnError: true,
     })
-    queryCache.invalidateQueries({ key: ['speech-providers'] })
-    queryCache.invalidateQueries({ key: ['speech-provider-detail', curProviderId.value] })
+    queryCache.invalidateQueries({ key: ['transcription-providers'] })
+    queryCache.invalidateQueries({ key: ['transcription-provider-detail', curProviderId.value] })
   } catch {
     curProvider.value = { ...curProvider.value, enable: prev }
     toast.error(t('common.saveFailed'))
@@ -402,8 +346,8 @@ async function handleSaveProvider() {
       throwOnError: true,
     })
     toast.success(t('speech.saveSuccess'))
-    queryCache.invalidateQueries({ key: ['speech-providers'] })
-    queryCache.invalidateQueries({ key: ['speech-provider-detail', curProviderId.value] })
+    queryCache.invalidateQueries({ key: ['transcription-providers'] })
+    queryCache.invalidateQueries({ key: ['transcription-provider-detail', curProviderId.value] })
   } catch {
     toast.error(t('common.saveFailed'))
   } finally {
@@ -415,23 +359,13 @@ async function handleSaveModel(modelId: string, config: Record<string, unknown>)
   const model = providerModels.value.find(item => item.id === modelId)
   if (!model) return
   try {
-    const apiBase = import.meta.env.VITE_API_URL?.trim() || '/api'
-    const token = localStorage.getItem('token')
-    const resp = await fetch(`${apiBase}/speech-models/${modelId}`, {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify({
-        name: model.name ?? model.model_id,
-        config,
-      }),
+    await client.put({
+      url: `/transcription-models/${modelId}`,
+      body: { name: model.name ?? model.model_id, config },
     })
-    if (!resp.ok) throw new Error(await resp.text())
     toast.success(t('speech.saveSuccess'))
-    queryCache.invalidateQueries({ key: ['speech-provider-models', curProviderId.value] })
-    queryCache.invalidateQueries({ key: ['speech-models'] })
+    queryCache.invalidateQueries({ key: ['transcription-provider-models', curProviderId.value] })
+    queryCache.invalidateQueries({ key: ['transcription-models'] })
   } catch {
     toast.error(t('common.saveFailed'))
   }
@@ -441,46 +375,35 @@ async function handleImportModels() {
   if (!curProviderId.value) return
   importLoading.value = true
   try {
-    const { data } = await postSpeechProvidersByIdImportModels({
-      path: { id: curProviderId.value },
-      throwOnError: true,
-    })
-    toast.success(t('speech.importSuccess', {
-      created: data?.created ?? 0,
-      skipped: data?.skipped ?? 0,
+    const { data } = await client.post({ url: `/transcription-providers/${curProviderId.value}/import-models` })
+    const payload = (data ?? {}) as { created?: number, skipped?: number }
+    toast.success(t('speech.transcription.importSuccess', {
+      created: payload.created ?? 0,
+      skipped: payload.skipped ?? 0,
     }))
-    queryCache.invalidateQueries({ key: ['speech-provider-models', curProviderId.value] })
-    queryCache.invalidateQueries({ key: ['speech-models'] })
-    queryCache.invalidateQueries({ key: ['speech-providers-meta'] })
+    queryCache.invalidateQueries({ key: ['transcription-provider-models', curProviderId.value] })
+    queryCache.invalidateQueries({ key: ['transcription-models'] })
+    queryCache.invalidateQueries({ key: ['transcription-providers-meta'] })
   } catch {
-    toast.error(t('speech.importFailed'))
+    toast.error(t('speech.transcription.importFailed'))
   } finally {
     importLoading.value = false
   }
 }
 
-async function handleTestModel(modelId: string, text: string, config: Record<string, unknown>) {
+async function handleTestModel(modelId: string, file: File, config: Record<string, unknown>) {
+  const form = new FormData()
+  form.append('file', file)
+  form.append('config', JSON.stringify(config))
   const apiBase = import.meta.env.VITE_API_URL?.trim() || '/api'
   const token = localStorage.getItem('token')
-  const resp = await fetch(`${apiBase}/speech-models/${modelId}/test`, {
+  const resp = await fetch(`${apiBase}/transcription-models/${modelId}/test`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    body: JSON.stringify({ text, config }),
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+    body: form,
   })
-  if (!resp.ok) {
-    const errBody = await resp.text()
-    let msg: string
-    try {
-      msg = JSON.parse(errBody)?.message ?? errBody
-    } catch {
-      msg = errBody
-    }
-    throw new Error(msg)
-  }
-  return resp.blob()
+  if (!resp.ok) throw new Error(await resp.text())
+  return await resp.json()
 }
 
 function sanitizeConfig(input: Record<string, unknown>) {

@@ -45,20 +45,40 @@ export const CLIENT_TYPE_META: Record<string, ClientTypeMeta> = {
     label: 'OpenAI Speech',
     hint: 'OpenAI /audio/speech compatible TTS',
   },
+  'openai-transcription': {
+    value: 'openai-transcription',
+    label: 'OpenAI Transcription',
+    hint: 'OpenAI audio transcription',
+  },
   'openrouter-speech': {
     value: 'openrouter-speech',
     label: 'OpenRouter Speech',
     hint: 'OpenRouter audio modality TTS',
+  },
+  'openrouter-transcription': {
+    value: 'openrouter-transcription',
+    label: 'OpenRouter Transcription',
+    hint: 'OpenRouter transcription models',
   },
   'elevenlabs-speech': {
     value: 'elevenlabs-speech',
     label: 'ElevenLabs Speech',
     hint: 'ElevenLabs text-to-speech',
   },
+  'elevenlabs-transcription': {
+    value: 'elevenlabs-transcription',
+    label: 'ElevenLabs Transcription',
+    hint: 'ElevenLabs speech-to-text',
+  },
   'deepgram-speech': {
     value: 'deepgram-speech',
     label: 'Deepgram Speech',
     hint: 'Deepgram TTS',
+  },
+  'deepgram-transcription': {
+    value: 'deepgram-transcription',
+    label: 'Deepgram Transcription',
+    hint: 'Deepgram speech-to-text',
   },
   'minimax-speech': {
     value: 'minimax-speech',
@@ -85,9 +105,14 @@ export const CLIENT_TYPE_META: Record<string, ClientTypeMeta> = {
     label: 'Google Speech',
     hint: 'Gemini speech transcription',
   },
+  'google-transcription': {
+    value: 'google-transcription',
+    label: 'Google Transcription',
+    hint: 'Gemini speech transcription',
+  },
 }
 
 export const CLIENT_TYPE_LIST: ClientTypeMeta[] = Object.values(CLIENT_TYPE_META)
 
 export const LLM_CLIENT_TYPE_LIST: ClientTypeMeta[] = CLIENT_TYPE_LIST
-  .filter(ct => !ct.value.endsWith('-speech'))
+  .filter(ct => !ct.value.endsWith('-speech') && !ct.value.endsWith('-transcription'))

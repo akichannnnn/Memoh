@@ -35,10 +35,30 @@ func (s *Service) ListMeta(_ context.Context) []ProviderMetaResponse {
 	return s.registry.ListMeta()
 }
 
+func (s *Service) ListSpeechMeta(_ context.Context) []ProviderMetaResponse {
+	return s.registry.ListSpeechMeta()
+}
+
+func (s *Service) ListTranscriptionMeta(_ context.Context) []ProviderMetaResponse {
+	return s.registry.ListTranscriptionMeta()
+}
+
 func (s *Service) ListSpeechProviders(ctx context.Context) ([]SpeechProviderResponse, error) {
 	rows, err := s.queries.ListSpeechProviders(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list speech providers: %w", err)
+	}
+	items := make([]SpeechProviderResponse, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, toSpeechProviderResponse(row))
+	}
+	return items, nil
+}
+
+func (s *Service) ListTranscriptionProviders(ctx context.Context) ([]SpeechProviderResponse, error) {
+	rows, err := s.queries.ListTranscriptionProviders(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list transcription providers: %w", err)
 	}
 	items := make([]SpeechProviderResponse, 0, len(rows))
 	for _, row := range rows {

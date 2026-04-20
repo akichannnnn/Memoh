@@ -64,6 +64,7 @@
     "webSearch": "搜索",
     "memory": "记忆",
     "speech": "语音",
+    "transcription": "转写",
     "email": "邮件",
     "profile": "用户",
     "home": "首页",
@@ -457,6 +458,11 @@
       "generate": "生成",
       "failed": "合成失败"
     }
+  },
+  "transcription": {
+    "title": "语音转写",
+    "emptyTitle": "暂无转写提供方",
+    "emptyDescription": "添加转写提供方以为 Bot 启用语音转文字功能"
   },
   "email": {
     "title": "邮件提供方",

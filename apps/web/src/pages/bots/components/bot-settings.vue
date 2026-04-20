@@ -463,6 +463,17 @@ const { data: transcriptionModelData } = useQuery({
   },
 })
 
+const { data: transcriptionProviderData } = useQuery({
+  key: ['transcription-providers'],
+  query: async () => {
+    const resp = await client.get({
+      url: '/transcription-providers',
+      throwOnError: true,
+    })
+    return resp.data
+  },
+})
+
 const { data: browserContextData } = useQuery({
   key: ['all-browser-contexts'],
   query: async () => {
@@ -517,8 +528,10 @@ const searchProviders = computed(() => (searchProviderData.value ?? []).filter((
 const memoryProviders = computed(() => memoryProviderData.value ?? [])
 const ttsProviders = computed(() => (ttsProviderData.value ?? []).filter((p) => p.enable !== false))
 const enabledTtsProviderIds = computed(() => new Set(ttsProviders.value.map((p) => p.id)))
+const transcriptionProviders = computed(() => (transcriptionProviderData.value ?? []).filter((p: Record<string, unknown>) => p.enable !== false))
+const enabledTranscriptionProviderIds = computed(() => new Set(transcriptionProviders.value.map((p: Record<string, unknown>) => p.id as string)))
 const ttsModels = computed(() => (ttsModelData.value ?? []).filter((m: Record<string, unknown>) => enabledTtsProviderIds.value.has(m.provider_id as string)))
-const transcriptionModels = computed(() => (transcriptionModelData.value ?? []).filter((m: Record<string, unknown>) => enabledTtsProviderIds.value.has(m.provider_id as string)))
+const transcriptionModels = computed(() => (transcriptionModelData.value ?? []).filter((m: Record<string, unknown>) => enabledTranscriptionProviderIds.value.has(m.provider_id as string)))
 const browserContexts = computed(() => browserContextData.value ?? [])
 
 // ---- Form ----

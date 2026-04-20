@@ -77,14 +77,19 @@ CREATE TABLE IF NOT EXISTS providers (
     'github-copilot',
     'edge-speech',
     'openai-speech',
+    'openai-transcription',
     'openrouter-speech',
+    'openrouter-transcription',
     'elevenlabs-speech',
+    'elevenlabs-transcription',
     'deepgram-speech',
+    'deepgram-transcription',
     'minimax-speech',
     'volcengine-speech',
     'alibabacloud-speech',
     'microsoft-speech',
-    'google-speech'
+    'google-speech',
+    'google-transcription'
   ))
 );
 

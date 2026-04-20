@@ -40,14 +40,19 @@ FROM providers
 WHERE client_type NOT IN (
   'edge-speech',
   'openai-speech',
+  'openai-transcription',
   'openrouter-speech',
+  'openrouter-transcription',
   'elevenlabs-speech',
+  'elevenlabs-transcription',
   'deepgram-speech',
+  'deepgram-transcription',
   'minimax-speech',
   'volcengine-speech',
   'alibabacloud-speech',
   'microsoft-speech',
-  'google-speech'
+  'google-speech',
+  'google-transcription'
 )
 `
 
@@ -805,14 +810,19 @@ SELECT id, name, client_type, icon, enable, config, metadata, created_at, update
 WHERE client_type NOT IN (
   'edge-speech',
   'openai-speech',
+  'openai-transcription',
   'openrouter-speech',
+  'openrouter-transcription',
   'elevenlabs-speech',
+  'elevenlabs-transcription',
   'deepgram-speech',
+  'deepgram-transcription',
   'minimax-speech',
   'volcengine-speech',
   'alibabacloud-speech',
   'microsoft-speech',
-  'google-speech'
+  'google-speech',
+  'google-transcription'
 )
 ORDER BY created_at DESC
 `
@@ -945,8 +955,7 @@ WHERE client_type IN (
   'minimax-speech',
   'volcengine-speech',
   'alibabacloud-speech',
-  'microsoft-speech',
-  'google-speech'
+  'microsoft-speech'
 )
 ORDER BY created_at DESC
 `
@@ -1055,6 +1064,48 @@ func (q *Queries) ListTranscriptionModelsByProviderID(ctx context.Context, provi
 			&i.ProviderID,
 			&i.Type,
 			&i.Config,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTranscriptionProviders = `-- name: ListTranscriptionProviders :many
+SELECT id, name, client_type, icon, enable, config, metadata, created_at, updated_at FROM providers
+WHERE client_type IN (
+  'openai-transcription',
+  'openrouter-transcription',
+  'elevenlabs-transcription',
+  'deepgram-transcription',
+  'google-transcription'
+)
+ORDER BY created_at DESC
+`
+
+func (q *Queries) ListTranscriptionProviders(ctx context.Context) ([]Provider, error) {
+	rows, err := q.db.Query(ctx, listTranscriptionProviders)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Provider
+	for rows.Next() {
+		var i Provider
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.ClientType,
+			&i.Icon,
+			&i.Enable,
+			&i.Config,
+			&i.Metadata,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {

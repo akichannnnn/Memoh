@@ -53,11 +53,60 @@ type Registry struct {
 	ordered   []models.ClientType
 }
 
+func isTranscriptionClientType(clientType models.ClientType) bool {
+	switch clientType {
+	case
+		models.ClientTypeOpenAITranscription,
+		models.ClientTypeOpenRouterTranscription,
+		models.ClientTypeElevenLabsTranscription,
+		models.ClientTypeDeepgramTranscription,
+		models.ClientTypeGoogleTranscription:
+		return true
+	default:
+		return false
+	}
+}
+
+func speechToTranscriptionClientType(clientType models.ClientType) models.ClientType {
+	switch clientType {
+	case models.ClientTypeOpenAISpeech:
+		return models.ClientTypeOpenAITranscription
+	case models.ClientTypeOpenRouterSpeech:
+		return models.ClientTypeOpenRouterTranscription
+	case models.ClientTypeElevenLabsSpeech:
+		return models.ClientTypeElevenLabsTranscription
+	case models.ClientTypeDeepgramSpeech:
+		return models.ClientTypeDeepgramTranscription
+	case models.ClientTypeGoogleSpeech:
+		return models.ClientTypeGoogleTranscription
+	default:
+		return ""
+	}
+}
+
+func transcriptionDisplayName(displayName string) string {
+	displayName = strings.TrimSpace(displayName)
+	if displayName == "Google Speech" {
+		return "Google Transcription"
+	}
+	if strings.HasSuffix(displayName, " Speech") {
+		return strings.TrimSuffix(displayName, " Speech") + " Transcription"
+	}
+	return displayName + " Transcription"
+}
+
 func NewRegistry() *Registry {
 	r := &Registry{
 		providers: make(map[models.ClientType]ProviderDefinition),
 	}
-	for _, def := range defaultProviderDefinitions() {
+	baseDefs := defaultProviderDefinitions()
+	for _, def := range baseDefs {
+		if def.Factory == nil && def.TranscriptionFactory != nil {
+			continue
+		}
+		r.Register(def)
+	}
+	for _, def := range transcriptionProviderDefinitions(baseDefs) {
 		r.Register(def)
 	}
 	return r
@@ -121,6 +170,81 @@ func (r *Registry) ListMeta() []ProviderMetaResponse {
 		})
 	}
 	return metas
+}
+
+func (r *Registry) ListSpeechMeta() []ProviderMetaResponse {
+	defs := r.List()
+	metas := make([]ProviderMetaResponse, 0, len(defs))
+	for _, def := range defs {
+		if def.Factory == nil {
+			continue
+		}
+		metas = append(metas, ProviderMetaResponse{
+			Provider:              string(def.ClientType),
+			DisplayName:           def.DisplayName,
+			Description:           def.Description,
+			ConfigSchema:          def.ConfigSchema,
+			DefaultModel:          def.DefaultModel,
+			Models:                def.Models,
+			DefaultSynthesisModel: def.DefaultModel,
+			SynthesisModels:       def.Models,
+			SupportsSynthesisList: def.SupportsList,
+		})
+	}
+	return metas
+}
+
+func (r *Registry) ListTranscriptionMeta() []ProviderMetaResponse {
+	defs := r.List()
+	metas := make([]ProviderMetaResponse, 0, len(defs))
+	for _, def := range defs {
+		if def.TranscriptionFactory == nil || !isTranscriptionClientType(def.ClientType) {
+			continue
+		}
+		modelsList := def.TranscriptionModels
+		if len(modelsList) == 0 {
+			modelsList = def.Models
+		}
+		metas = append(metas, ProviderMetaResponse{
+			Provider:                  string(def.ClientType),
+			DisplayName:               def.DisplayName,
+			Description:               def.Description,
+			ConfigSchema:              def.ConfigSchema,
+			DefaultModel:              def.DefaultTranscriptionModel,
+			Models:                    modelsList,
+			DefaultTranscriptionModel: def.DefaultTranscriptionModel,
+			TranscriptionModels:       modelsList,
+			SupportsTranscriptionList: def.SupportsTranscriptionList,
+		})
+	}
+	return metas
+}
+
+func transcriptionProviderDefinitions(base []ProviderDefinition) []ProviderDefinition {
+	out := make([]ProviderDefinition, 0, len(base))
+	for _, def := range base {
+		clientType := speechToTranscriptionClientType(def.ClientType)
+		if clientType == "" || def.TranscriptionFactory == nil {
+			continue
+		}
+		modelsList := def.TranscriptionModels
+		out = append(out, ProviderDefinition{
+			ClientType:                clientType,
+			DisplayName:               transcriptionDisplayName(def.DisplayName),
+			Icon:                      def.Icon,
+			Description:               strings.TrimSpace(def.Description),
+			ConfigSchema:              def.ConfigSchema,
+			DefaultModel:              def.DefaultTranscriptionModel,
+			SupportsList:              def.SupportsTranscriptionList,
+			Models:                    modelsList,
+			DefaultTranscriptionModel: def.DefaultTranscriptionModel,
+			SupportsTranscriptionList: def.SupportsTranscriptionList,
+			TranscriptionModels:       modelsList,
+			TranscriptionFactory:      def.TranscriptionFactory,
+			Order:                     def.Order + 1,
+		})
+	}
+	return out
 }
 
 func defaultProviderDefinitions() []ProviderDefinition {

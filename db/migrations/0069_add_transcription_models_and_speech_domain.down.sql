@@ -1,5 +1,14 @@
--- 0069_add_transcription_models_and_google_speech
--- Expand unified speech domain to support transcription models and Google speech providers.
+-- 0069_add_transcription_models_and_speech_domain
+-- Revert transcription model type and speech-domain expansion.
+
+DELETE FROM models WHERE type = 'transcription';
+DELETE FROM providers WHERE client_type = 'google-speech';
+
+ALTER TABLE models
+  DROP CONSTRAINT IF EXISTS models_type_check;
+
+ALTER TABLE models
+  ADD CONSTRAINT models_type_check CHECK (type IN ('chat', 'embedding', 'speech'));
 
 ALTER TABLE providers
   DROP CONSTRAINT IF EXISTS providers_client_type_check;
@@ -20,12 +29,5 @@ ALTER TABLE providers
     'minimax-speech',
     'volcengine-speech',
     'alibabacloud-speech',
-    'microsoft-speech',
-    'google-speech'
+    'microsoft-speech'
   ));
-
-ALTER TABLE models
-  DROP CONSTRAINT IF EXISTS models_type_check;
-
-ALTER TABLE models
-  ADD CONSTRAINT models_type_check CHECK (type IN ('chat', 'embedding', 'speech', 'transcription'));

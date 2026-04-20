@@ -21,14 +21,19 @@ SELECT * FROM providers
 WHERE client_type NOT IN (
   'edge-speech',
   'openai-speech',
+  'openai-transcription',
   'openrouter-speech',
+  'openrouter-transcription',
   'elevenlabs-speech',
+  'elevenlabs-transcription',
   'deepgram-speech',
+  'deepgram-transcription',
   'minimax-speech',
   'volcengine-speech',
   'alibabacloud-speech',
   'microsoft-speech',
-  'google-speech'
+  'google-speech',
+  'google-transcription'
 )
 ORDER BY created_at DESC;
 
@@ -54,14 +59,19 @@ FROM providers
 WHERE client_type NOT IN (
   'edge-speech',
   'openai-speech',
+  'openai-transcription',
   'openrouter-speech',
+  'openrouter-transcription',
   'elevenlabs-speech',
+  'elevenlabs-transcription',
   'deepgram-speech',
+  'deepgram-transcription',
   'minimax-speech',
   'volcengine-speech',
   'alibabacloud-speech',
   'microsoft-speech',
-  'google-speech'
+  'google-speech',
+  'google-transcription'
 );
 
 -- name: CreateModel :one
@@ -230,8 +240,18 @@ WHERE client_type IN (
   'minimax-speech',
   'volcengine-speech',
   'alibabacloud-speech',
-  'microsoft-speech',
-  'google-speech'
+  'microsoft-speech'
+)
+ORDER BY created_at DESC;
+
+-- name: ListTranscriptionProviders :many
+SELECT * FROM providers
+WHERE client_type IN (
+  'openai-transcription',
+  'openrouter-transcription',
+  'elevenlabs-transcription',
+  'deepgram-transcription',
+  'google-transcription'
 )
 ORDER BY created_at DESC;
 

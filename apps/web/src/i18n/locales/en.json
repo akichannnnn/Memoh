@@ -63,6 +63,7 @@
     "webSearch": "Web Search",
     "memory": "Memory",
     "speech": "Speech",
+    "transcription": "Transcription",
     "email": "Email",
     "settings": "Settings",
     "profile": "Profile",
@@ -461,6 +462,11 @@
       "generate": "Generate",
       "failed": "Synthesis failed"
     }
+  },
+  "transcription": {
+    "title": "Transcription",
+    "emptyTitle": "No Transcription Providers",
+    "emptyDescription": "Add a transcription provider to enable speech-to-text for your bots"
   },
   "email": {
     "title": "Email",

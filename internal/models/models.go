@@ -432,14 +432,19 @@ func IsValidClientType(clientType ClientType) bool {
 		ClientTypeGitHubCopilot,
 		ClientTypeEdgeSpeech,
 		ClientTypeOpenAISpeech,
+		ClientTypeOpenAITranscription,
 		ClientTypeOpenRouterSpeech,
+		ClientTypeOpenRouterTranscription,
 		ClientTypeElevenLabsSpeech,
+		ClientTypeElevenLabsTranscription,
 		ClientTypeDeepgramSpeech,
+		ClientTypeDeepgramTranscription,
 		ClientTypeMiniMaxSpeech,
 		ClientTypeVolcengineSpeech,
 		ClientTypeAlibabaSpeech,
 		ClientTypeMicrosoftSpeech,
-		ClientTypeGoogleSpeech:
+		ClientTypeGoogleSpeech,
+		ClientTypeGoogleTranscription:
 		return true
 	default:
 		return false
@@ -449,7 +454,9 @@ func IsValidClientType(clientType ClientType) bool {
 // IsLLMClientType returns true if the client type belongs to the LLM domain
 // (chat/embedding), excluding speech-only types (any type ending in "-speech").
 func IsLLMClientType(clientType ClientType) bool {
-	return IsValidClientType(clientType) && !strings.HasSuffix(string(clientType), "-speech")
+	return IsValidClientType(clientType) &&
+		!strings.HasSuffix(string(clientType), "-speech") &&
+		!strings.HasSuffix(string(clientType), "-transcription")
 }
 
 // SelectMemoryModel selects a chat model for memory operations.
