@@ -129,7 +129,7 @@ export const useChatStore = defineStore('chat', () => {
       sessionId.value = null
       replaceMessages([])
     }
-  })
+  }, { immediate: true })
 
   const nextId = () => `${Date.now()}-${Math.floor(Math.random() * 1000)}`
 
@@ -793,6 +793,7 @@ export const useChatStore = defineStore('chat', () => {
   return {
     messages,
     streaming,
+    streamingSessionId,
     sessions,
     chats,
     chatId,
