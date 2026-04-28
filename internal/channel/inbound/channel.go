@@ -93,6 +93,10 @@ type SessionEnsurer interface {
 	CreateNewSession(ctx context.Context, botID, routeID, channelType, sessionType string) (SessionResult, error)
 }
 
+type ToolApprovalRunner interface {
+	RespondToolApproval(ctx context.Context, input flow.ToolApprovalResponseInput, eventCh chan<- flow.WSStreamEvent) error
+}
+
 // IMDisplayOptionsReader exposes bot-level IM display preferences.
 // Implementations typically adapt the settings service.
 type IMDisplayOptionsReader interface {
@@ -377,7 +381,7 @@ func (p *ChannelInboundProcessor) HandleInbound(ctx context.Context, cfg channel
 
 	// Skip generic command handler for mode-prefix commands (/btw, /now, /next)
 	// so they pass through to mode detection below.
-	if p.commandHandler != nil && p.commandHandler.IsCommand(cmdText) && !IsModeCommand(cmdText) && isDirectedAtBot(msg) {
+	if p.commandHandler != nil && p.commandHandler.IsCommand(cmdText) && !IsModeCommand(cmdText) && !isToolApprovalCommand(cmdText) && isDirectedAtBot(msg) {
 		reply, err := p.commandHandler.ExecuteWithInput(ctx, command.ExecuteInput{
 			BotID:             strings.TrimSpace(identity.BotID),
 			ChannelIdentityID: strings.TrimSpace(identity.ChannelIdentityID),
@@ -489,6 +493,10 @@ func (p *ChannelInboundProcessor) HandleInbound(ctx context.Context, cfg channel
 			)
 		}
 		return nil
+	}
+
+	if isToolApprovalCommand(cmdText) && isDirectedAtBot(msg) {
+		return p.handleToolApprovalCommand(ctx, msg, sender, identity, resolved.RouteID, sessionID, cmdText)
 	}
 
 	// Push event into the DCP pipeline (persist + in-memory projection).
@@ -1335,6 +1343,9 @@ type agentStreamEnvelope struct {
 
 	ToolName    string          `json:"toolName"`
 	ToolCallID  string          `json:"toolCallId"`
+	ApprovalID  string          `json:"approvalId"`
+	ShortID     int             `json:"shortId"`
+	Status      string          `json:"status"`
 	Input       json.RawMessage `json:"input"`
 	Result      json.RawMessage `json:"result"`
 	Attachments json.RawMessage `json:"attachments"`
@@ -1396,6 +1407,23 @@ func mapStreamChunkToChannelEvents(chunk conversation.StreamChunk) ([]channel.St
 					CallID: strings.TrimSpace(envelope.ToolCallID),
 					Input:  parseRawJSON(envelope.Input),
 					Result: parseRawJSON(envelope.Result),
+				},
+			},
+		}, finalMessages, nil
+	case "tool_approval_request":
+		return []channel.StreamEvent{
+			{
+				Type: channel.StreamEventToolCallStart,
+				ToolCall: &channel.StreamToolCall{
+					Name:       strings.TrimSpace(envelope.ToolName),
+					CallID:     strings.TrimSpace(envelope.ToolCallID),
+					Input:      parseRawJSON(envelope.Input),
+					ApprovalID: strings.TrimSpace(envelope.ApprovalID),
+					ShortID:    envelope.ShortID,
+					Actions: []channel.Action{
+						{Type: "tool_approval", Label: "Approve", Value: "approve:" + strings.TrimSpace(envelope.ApprovalID)},
+						{Type: "tool_approval", Label: "Reject", Value: "reject:" + strings.TrimSpace(envelope.ApprovalID)},
+					},
 				},
 			},
 		}, finalMessages, nil
@@ -2717,6 +2745,212 @@ func isStatusCommand(cmdText string) bool {
 		return false
 	}
 	return parsed.Resource == "status"
+}
+
+func isToolApprovalCommand(cmdText string) bool {
+	extracted := command.ExtractCommandText(cmdText)
+	if extracted == "" {
+		return false
+	}
+	parsed, err := command.Parse(extracted)
+	if err != nil {
+		return false
+	}
+	return parsed.Resource == "approve" || parsed.Resource == "reject"
+}
+
+func (p *ChannelInboundProcessor) handleToolApprovalCommand(ctx context.Context, msg channel.InboundMessage, sender channel.StreamReplySender, identity InboundIdentity, routeID, sessionID, cmdText string) error {
+	approvalRunner, ok := p.runner.(ToolApprovalRunner)
+	if !ok {
+		return sender.Send(ctx, channel.OutboundMessage{
+			Target:  strings.TrimSpace(msg.ReplyTarget),
+			Message: channel.Message{Text: "Tool approval is not configured."},
+		})
+	}
+	extracted := command.ExtractCommandText(cmdText)
+	parsed, err := command.Parse(extracted)
+	if err != nil {
+		return sender.Send(ctx, channel.OutboundMessage{
+			Target:  strings.TrimSpace(msg.ReplyTarget),
+			Message: channel.Message{Text: "Invalid approval command."},
+		})
+	}
+	explicitID := ""
+	reason := ""
+	replyExternalID := ""
+	if msg.Message.Reply != nil {
+		replyExternalID = strings.TrimSpace(msg.Message.Reply.MessageID)
+	}
+	actionText := strings.TrimSpace(parsed.Action)
+	if parsed.Resource == "reject" && replyExternalID != "" && actionText != "" && !looksLikeApprovalID(actionText) {
+		reason = strings.TrimSpace(strings.Join(append([]string{actionText}, parsed.Args...), " "))
+	} else {
+		explicitID = actionText
+		reason = strings.TrimSpace(strings.Join(parsed.Args, " "))
+	}
+	return p.streamToolApprovalCommand(ctx, msg, sender, identity, approvalRunner, flow.ToolApprovalResponseInput{
+		BotID:                  strings.TrimSpace(identity.BotID),
+		SessionID:              strings.TrimSpace(sessionID),
+		ActorChannelIdentityID: strings.TrimSpace(identity.ChannelIdentityID),
+		ExplicitID:             explicitID,
+		ReplyExternalMessageID: replyExternalID,
+		Decision:               parsed.Resource,
+		Reason:                 reason,
+		ChatToken:              p.issueChatToken(identity, routeID, msg),
+	})
+}
+
+func (p *ChannelInboundProcessor) streamToolApprovalCommand(ctx context.Context, msg channel.InboundMessage, sender channel.StreamReplySender, identity InboundIdentity, approvalRunner ToolApprovalRunner, input flow.ToolApprovalResponseInput) error {
+	target := strings.TrimSpace(msg.ReplyTarget)
+	if target == "" {
+		return errors.New("reply target missing")
+	}
+	sourceMessageID := strings.TrimSpace(msg.Message.ID)
+	replyRef := &channel.ReplyRef{Target: target}
+	if sourceMessageID != "" {
+		replyRef.MessageID = sourceMessageID
+	}
+	stream, err := sender.OpenStream(ctx, target, channel.StreamOptions{
+		Reply:           replyRef,
+		SourceMessageID: sourceMessageID,
+		Metadata: map[string]any{
+			"conversation_type": msg.Conversation.Type,
+		},
+	})
+	if err != nil {
+		return err
+	}
+	streamClosed := false
+	closeStream := func() error {
+		if streamClosed {
+			return nil
+		}
+		streamClosed = true
+		return stream.Close(context.WithoutCancel(ctx))
+	}
+	defer func() { _ = closeStream() }()
+
+	if !isLocalChannelType(msg.Channel) && !p.shouldShowToolCallsInIM(ctx, identity.BotID) {
+		stream = channel.NewToolCallDroppingStream(stream)
+	}
+	if err := stream.Push(ctx, channel.StreamEvent{Type: channel.StreamEventStatus, Status: channel.StreamStatusStarted}); err != nil {
+		return err
+	}
+
+	eventCh := make(chan flow.WSStreamEvent, 64)
+	errCh := make(chan error, 1)
+	go func() {
+		defer close(eventCh)
+		errCh <- approvalRunner.RespondToolApproval(ctx, input, eventCh)
+		close(errCh)
+	}()
+
+	var finalMessages []conversation.ModelMessage
+	for eventCh != nil || errCh != nil {
+		select {
+		case chunk, ok := <-eventCh:
+			if !ok {
+				eventCh = nil
+				continue
+			}
+			events, messages, parseErr := mapStreamChunkToChannelEvents(chunk)
+			if parseErr != nil {
+				if p.logger != nil {
+					p.logger.Warn("approval stream chunk parse failed", slog.Any("error", parseErr))
+				}
+				continue
+			}
+			if len(messages) > 0 {
+				finalMessages = messages
+			}
+			for _, event := range events {
+				// Approval continuations should not flash transient "running"
+				// tool messages in IM. If tool visibility is enabled, the
+				// completed tool state may still be shown on tool_call_end.
+				if event.Type == channel.StreamEventToolCallStart &&
+					(event.ToolCall == nil || strings.TrimSpace(event.ToolCall.ApprovalID) == "") {
+					continue
+				}
+				if event.Type == channel.StreamEventReaction && len(event.Reactions) > 0 {
+					p.dispatchReactions(ctx, identity.BotID, msg.Channel, target, sourceMessageID, event.Reactions)
+					continue
+				}
+				if err := stream.Push(ctx, event); err != nil {
+					return err
+				}
+			}
+		case runErr, ok := <-errCh:
+			if !ok {
+				errCh = nil
+				continue
+			}
+			if runErr != nil {
+				_ = stream.Push(ctx, channel.StreamEvent{Type: channel.StreamEventError, Error: runErr.Error()})
+				return runErr
+			}
+		}
+	}
+
+	sentTexts, suppressReplies := collectMessageToolContext(p.registry, finalMessages, msg.Channel, target)
+	if !suppressReplies {
+		outputs := flow.ExtractAssistantOutputs(finalMessages)
+		for _, output := range outputs {
+			outMessage := buildChannelMessage(output, channel.ChannelCapabilities{Text: true, Markdown: true, Reply: true})
+			if outMessage.IsEmpty() {
+				continue
+			}
+			plainText := strings.TrimSpace(outMessage.PlainText())
+			if isSilentReplyText(plainText) || isMessagingToolDuplicate(plainText, sentTexts) {
+				continue
+			}
+			if outMessage.Reply == nil && sourceMessageID != "" {
+				outMessage.Reply = &channel.ReplyRef{Target: target, MessageID: sourceMessageID}
+			}
+			if err := stream.Push(ctx, channel.StreamEvent{
+				Type:  channel.StreamEventFinal,
+				Final: &channel.StreamFinalizePayload{Message: outMessage},
+			}); err != nil {
+				return err
+			}
+		}
+	}
+	if err := stream.Push(ctx, channel.StreamEvent{Type: channel.StreamEventStatus, Status: channel.StreamStatusCompleted}); err != nil {
+		return err
+	}
+	return closeStream()
+}
+
+func (p *ChannelInboundProcessor) issueChatToken(identity InboundIdentity, routeID string, msg channel.InboundMessage) string {
+	if p.jwtSecret == "" || strings.TrimSpace(msg.ReplyTarget) == "" {
+		return ""
+	}
+	signed, _, err := auth.GenerateChatToken(auth.ChatToken{
+		BotID:             identity.BotID,
+		ChatID:            identity.BotID,
+		RouteID:           strings.TrimSpace(routeID),
+		UserID:            identity.UserID,
+		ChannelIdentityID: identity.ChannelIdentityID,
+	}, p.jwtSecret, p.tokenTTL)
+	if err != nil {
+		if p.logger != nil {
+			p.logger.Warn("issue approval chat token failed", slog.Any("error", err))
+		}
+		return ""
+	}
+	return signed
+}
+
+func looksLikeApprovalID(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return strings.Contains(value, "-")
+		}
+	}
+	return true
 }
 
 // resolveNewSessionType determines the session type for /new command.

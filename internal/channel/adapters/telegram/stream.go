@@ -46,8 +46,9 @@ type telegramOutboundStream struct {
 // "running" state so the matching tool_call_end event can edit the same
 // message in-place to show the "completed" / "failed" state.
 type telegramToolCallMessage struct {
-	chatID int64
-	msgID  int
+	chatID     int64
+	msgID      int
+	hasActions bool
 }
 
 func (s *telegramOutboundStream) getBot(_ context.Context) (bot *tgbotapi.BotAPI, err error) {
@@ -387,13 +388,23 @@ func (s *telegramOutboundStream) sendToolCallMessage(
 				return err
 			}
 			editErr := error(nil)
-			if testEditFunc != nil {
+			switch {
+			case p.Status == channel.ToolCallStatusApprovalRequired && len(tcActions(tc)) > 0 && testEditFunc == nil:
+				editErr = editTelegramMessageTextWithActions(bot, existing.chatID, existing.msgID, text, parseMode, tcActions(tc))
+			case (p.Status == channel.ToolCallStatusCompleted || p.Status == channel.ToolCallStatusFailed) && existing.hasActions && testEditFunc == nil:
+				editErr = editTelegramMessageTextWithActions(bot, existing.chatID, existing.msgID, text, parseMode, nil)
+			case testEditFunc != nil:
 				editErr = testEditFunc(bot, existing.chatID, existing.msgID, text, parseMode)
-			} else {
+			default:
 				editErr = editTelegramMessageText(bot, existing.chatID, existing.msgID, text, parseMode)
 			}
 			if editErr == nil {
-				s.forgetToolCallMessage(callID)
+				if p.Status != channel.ToolCallStatusApprovalRequired {
+					s.forgetToolCallMessage(callID)
+				} else if len(tcActions(tc)) > 0 {
+					existing.hasActions = true
+					s.storeToolCallMessage(callID, existing)
+				}
 				return nil
 			}
 			if s.adapter != nil && s.adapter.logger != nil {
@@ -412,14 +423,30 @@ func (s *telegramOutboundStream) sendToolCallMessage(
 	if err != nil {
 		return err
 	}
-	chatID, msgID, sendErr := sendTelegramTextReturnMessage(bot, s.target, text, replyTo, parseMode)
+	var (
+		chatID  int64
+		msgID   int
+		sendErr error
+	)
+	if len(tcActions(tc)) > 0 {
+		chatID, msgID, sendErr = sendTelegramTextWithActionsReturnMessage(bot, s.target, text, replyTo, parseMode, tcActions(tc))
+	} else {
+		chatID, msgID, sendErr = sendTelegramTextReturnMessage(bot, s.target, text, replyTo, parseMode)
+	}
 	if sendErr != nil {
 		return sendErr
 	}
 	if p.Status == channel.ToolCallStatusRunning && callID != "" {
-		s.storeToolCallMessage(callID, telegramToolCallMessage{chatID: chatID, msgID: msgID})
+		s.storeToolCallMessage(callID, telegramToolCallMessage{chatID: chatID, msgID: msgID, hasActions: len(tcActions(tc)) > 0})
 	}
 	return nil
+}
+
+func tcActions(tc *channel.StreamToolCall) []channel.Action {
+	if tc == nil {
+		return nil
+	}
+	return tc.Actions
 }
 
 func (s *telegramOutboundStream) lookupToolCallMessage(callID string) (telegramToolCallMessage, bool) {
@@ -538,7 +565,7 @@ func (s *telegramOutboundStream) pushFinal(ctx context.Context, event channel.Pr
 	msg := event.Final.Message
 	finalText := bufText
 	if authoritative := strings.TrimSpace(msg.Message.PlainText()); authoritative != "" {
-		if !s.isPrivateChat || bufText != "" {
+		if !s.isPrivateChat || bufText != "" || (finalText == "" && len(msg.Message.Actions) > 0) {
 			finalText = authoritative
 		}
 	}
@@ -551,7 +578,15 @@ func (s *telegramOutboundStream) pushFinal(ctx context.Context, event channel.Pr
 		finalText = formatted
 	}
 
-	if err := s.deliverFinalText(ctx, finalText, s.parseMode); err != nil {
+	if len(msg.Message.Actions) > 0 && len(msg.Attachments) == 0 {
+		bot, replyTo, err := s.getBotAndReply(ctx)
+		if err != nil {
+			return err
+		}
+		if err := sendTelegramTextWithActions(bot, s.target, finalText, replyTo, s.parseMode, msg.Message.Actions); err != nil {
+			return err
+		}
+	} else if err := s.deliverFinalText(ctx, finalText, s.parseMode); err != nil {
 		return err
 	}
 

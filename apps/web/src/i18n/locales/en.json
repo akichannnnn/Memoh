@@ -199,6 +199,9 @@
       "spawn": "Spawn {count} subagents",
       "use_skill": "Use skill",
       "generic": "Tool",
+      "approve": "Allow",
+      "reject": "Reject",
+      "pendingApproval": "pending approval",
       "detail": {
         "openInFiles": "Open in files",
         "input": "Input",
@@ -668,6 +671,27 @@
     "title": "Home"
   },
   "bots": {
+    "toolApproval": {
+      "title": "Tool Call Approval",
+      "intro": "Require human approval before the bot writes, edits files, or runs commands inside its container. Configure rules per sensitive tool below — bypass templates skip approval automatically, must-review templates always trigger approval.",
+      "tools": {
+        "write": "Create new files inside the container",
+        "edit": "Modify existing files inside the container",
+        "exec": "Execute shell commands inside the container"
+      },
+      "toolDisabledHint": "Approval is currently off for this tool. The rules below take effect only after enabling the switch.",
+      "bypass": "Bypass (allow list)",
+      "bypassHint": "Calls matching any of these patterns are auto-approved without prompting.",
+      "mustReview": "Must review (deny list)",
+      "mustReviewHint": "Calls matching any of these patterns always trigger approval, even when this tool is otherwise auto-approved.",
+      "placeholders": {
+        "fileBypass": "/tmp/**\n/data/**",
+        "fileMustReview": "/etc/**\n.env*",
+        "execBypass": "ls\npwd\ngit status",
+        "execMustReview": "rm -rf *\nsudo *"
+      },
+      "unsavedChanges": "Unsaved changes"
+    },
     "title": "Bots",
     "searchPlaceholder": "Search bots…",
     "createBot": "New Bot",
@@ -769,6 +793,7 @@
     "tabs": {
       "overview": "Overview",
       "general": "General",
+      "toolApproval": "Tool Approval",
       "memory": "Memory",
       "channels": "Platforms",
       "container": "Container",
@@ -1029,6 +1054,10 @@
       "compactionModelPlaceholder": "Use chat model (default)",
       "showToolCallsInIM": "Show Tool Calls in IM",
       "showToolCallsInIMDescription": "Surface tool execution status (running / completed / failed) as a single message in IM channels. Off by default.",
+      "toolApproval": "Tool Call Approval",
+      "toolApprovalDescription": "Require human approval for sensitive write, edit, and exec tool calls, with bypass templates for safe paths or commands.",
+      "toolApprovalBypass": "Bypass",
+      "toolApprovalMustReview": "Must review",
       "browserContext": "Browser Context",
       "browserContextPlaceholder": "Select browser context (disabled if empty)",
       "allowGuest": "Default ACL Effect",

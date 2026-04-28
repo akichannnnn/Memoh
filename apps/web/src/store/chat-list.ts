@@ -18,6 +18,7 @@ import {
   type UIMessage,
   type UIReasoningMessage,
   type UITextMessage,
+  type UIToolApproval,
   type UIToolMessage,
   type UITurn,
   type UIUserTurn,
@@ -39,6 +40,7 @@ export interface ToolCallBlock extends UIToolMessage {
   toolName: string
   result: unknown | null
   done: boolean
+  approval?: UIToolApproval
 }
 
 export type ContentBlock = TextBlock | ThinkingBlock | ToolCallBlock | AttachmentBlock
@@ -98,6 +100,7 @@ export const useChatStore = defineStore('chat', () => {
   let activeWs: ChatWebSocket | null = null
   let refreshTimer: ReturnType<typeof setTimeout> | null = null
   let refreshPromise: Promise<void> | null = null
+  let suppressNextStartPlaceholder = false
   const messageEventsStream = useRetryingStream()
 
   const activeSession = computed(() =>
@@ -164,6 +167,7 @@ export const useChatStore = defineStore('chat', () => {
           toolName: msg.name,
           result: msg.output ?? null,
           done: !msg.running,
+          approval: msg.approval,
           progress: msg.progress ? [...msg.progress] : undefined,
         }
       case 'attachments':
@@ -328,21 +332,41 @@ export const useChatStore = defineStore('chat', () => {
     })
   }
 
+  function pruneEmptyAssistantTurnIfPending() {
+    if (!pendingAssistantStream) return
+    const turn = pendingAssistantStream.assistantTurn
+    if (turn.messages.length > 0) return
+    const idx = messages.indexOf(turn)
+    if (idx >= 0) messages.splice(idx, 1)
+  }
+
   function handleWSStreamEvent(event: UIStreamEvent) {
     switch (event.type) {
       case 'start':
-        ensureDiscussStream()
+        if (suppressNextStartPlaceholder) {
+          suppressNextStartPlaceholder = false
+        } else {
+          ensureDiscussStream()
+        }
         break
       case 'message':
         upsertAssistantUIMessage(ensureDiscussStream().assistantTurn, event.data)
         break
       case 'end':
+        pruneEmptyAssistantTurnIfPending()
         resolvePendingAssistantStream()
+        streamingSessionId.value = null
+        loading.value = false
+        abortFn = null
+        void refreshCurrentSession()
         break
       case 'error': {
         const session = ensureDiscussStream()
         appendAssistantError(session, event.message || 'stream error')
         rejectPendingAssistantStream(new Error(event.message || 'stream error'))
+        streamingSessionId.value = null
+        loading.value = false
+        abortFn = null
         break
       }
     }
@@ -718,6 +742,46 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  async function respondToolApproval(approval: UIToolApproval, decision: 'approve' | 'reject') {
+    const bid = currentBotId.value ?? ''
+    const sid = sessionId.value ?? ''
+    if (!bid || !sid || !approval.approval_id || streaming.value) return
+    const ws = ensureWebSocket(bid)
+    streamingSessionId.value = sid
+    loading.value = true
+    suppressNextStartPlaceholder = true
+    // Optimistically update the approved/rejected tool block before the
+    // server snapshot arrives so the buttons disappear immediately.
+    for (const message of messages) {
+      if (message.role !== 'assistant') continue
+      for (const block of message.messages) {
+        if (block.type === 'tool' && block.approval?.approval_id === approval.approval_id) {
+          block.approval = {
+            ...block.approval,
+            status: decision === 'approve' ? 'approved' : 'rejected',
+            can_approve: false,
+          }
+        }
+      }
+    }
+    abortFn = () => {
+      const abortError = new Error('aborted')
+      abortError.name = 'AbortError'
+      ws?.abort()
+      rejectPendingAssistantStream(abortError)
+      streamingSessionId.value = null
+      loading.value = false
+      abortFn = null
+    }
+    ws?.send({
+      type: 'tool_approval_response',
+      session_id: sid,
+      approval_id: approval.approval_id,
+      short_id: approval.short_id,
+      decision,
+    })
+  }
+
   function clearMessages() {
     abort()
     replaceMessages([])
@@ -754,6 +818,7 @@ export const useChatStore = defineStore('chat', () => {
     removeChat: removeSession,
     deleteChat: removeSession,
     sendMessage,
+    respondToolApproval,
     clearMessages,
     loadOlderMessages,
     abort,
