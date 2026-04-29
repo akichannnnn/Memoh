@@ -124,8 +124,8 @@ const openStatus = reactive({
                 </span>
                 <Badge
                   v-if="providerItem.enable !== false"
-                  class="absolute bottom-[2px] right-[2px] p-0.5 rounded-full"
-                  variant="destructive"
+                  class="absolute -bottom-0.5 -right-0.5 size-2.5 p-0 rounded-full ring-2 ring-background"
+                  variant="success"
                 />
               </span>
               <span class="truncate">{{ providerItem.name }}</span>
