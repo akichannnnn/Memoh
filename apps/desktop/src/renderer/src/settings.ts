@@ -27,6 +27,15 @@ setupApiClient({
   },
 })
 
+// Cross-window navigation: chat-side `router.push('/settings/...')` calls
+// reach us as IPC `settings:navigate` events forwarded by the main
+// process. Wire the listener up before mounting so the very first event
+// (sent on cold-start replay right after `did-finish-load`) is captured.
+window.api.window.onSettingsNavigate((target) => {
+  if (router.currentRoute.value.fullPath === target) return
+  void router.push(target)
+})
+
 createApp(App)
   .use(createPinia().use(piniaPluginPersistedstate))
   .use(PiniaColada)

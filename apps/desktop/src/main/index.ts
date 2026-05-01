@@ -11,6 +11,14 @@ type WindowKind = 'chat' | 'settings'
 let chatWindow: BrowserWindow | null = null
 let settingsWindow: BrowserWindow | null = null
 
+// Pending settings-navigate target keyed by webContents id. Set by the
+// `window:open-settings` IPC when the settings window has not finished
+// loading yet (cold start, refresh, etc.) and drained by the per-window
+// `did-finish-load` listener attached at creation time. Storing on a Map
+// rather than a closure variable lets us stay correct if a future change
+// ever introduces multiple settings windows.
+const pendingSettingsNavigate = new Map<number, string>()
+
 function applyExternalLinkHandler(window: BrowserWindow): void {
   window.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url)
@@ -97,7 +105,18 @@ function createSettingsWindow(): BrowserWindow {
     window.show()
   })
   window.on('closed', () => {
+    pendingSettingsNavigate.delete(window.webContents.id)
     settingsWindow = null
+  })
+
+  // Drain any queued navigate target as soon as the renderer is ready to
+  // receive IPC messages. Reusing `did-finish-load` keeps both fresh
+  // cold-starts and in-place refreshes working without extra coordination.
+  window.webContents.on('did-finish-load', () => {
+    const target = pendingSettingsNavigate.get(window.webContents.id)
+    if (!target) return
+    pendingSettingsNavigate.delete(window.webContents.id)
+    window.webContents.send('settings:navigate', target)
   })
 
   applyExternalLinkHandler(window)
@@ -122,6 +141,18 @@ function focusWindow(window: BrowserWindow): void {
   window.focus()
 }
 
+function dispatchSettingsNavigate(window: BrowserWindow, target: string): void {
+  // If the renderer hasn't booted yet (cold start) or is mid-reload, we
+  // can't push the navigate event straight away — buffer it for the
+  // `did-finish-load` listener to drain. Otherwise send immediately so
+  // warm clicks feel instant.
+  if (window.webContents.isLoading()) {
+    pendingSettingsNavigate.set(window.webContents.id, target)
+    return
+  }
+  window.webContents.send('settings:navigate', target)
+}
+
 app.whenReady().then(() => {
   electronApp.setAppUserModelId('ai.memoh.desktop')
 
@@ -133,8 +164,13 @@ app.whenReady().then(() => {
     optimizer.watchWindowShortcuts(window)
   })
 
-  ipcMain.handle('window:open-settings', () => {
-    focusWindow(ensureWindow('settings'))
+  ipcMain.handle('window:open-settings', (_event, rawTarget: unknown) => {
+    const window = ensureWindow('settings')
+    focusWindow(window)
+    const target = typeof rawTarget === 'string' && rawTarget.startsWith('/settings')
+      ? rawTarget
+      : null
+    if (target) dispatchSettingsNavigate(window, target)
   })
   ipcMain.handle('window:close-self', (event) => {
     const sender = BrowserWindow.fromWebContents(event.sender)

@@ -58,14 +58,16 @@ apps/desktop/
 │       ├── settings.html           # Settings window root
 │       ├── src/
 │       │   ├── main.ts             # Chat renderer bootstrap (createApp, plugins, router, i18n)
-│       │   ├── settings.ts         # Settings renderer bootstrap (parallel chain)
+│       │   ├── settings.ts         # Settings renderer bootstrap (parallel chain) + onSettingsNavigate listener
 │       │   ├── env.d.ts            # vite/client + *.vue ambient module
 │       │   ├── chat/
 │       │   │   ├── App.vue         # Chat root (provides DesktopShellKey, Toaster)
-│       │   │   └── router.ts       # Chat routes + /settings/* IPC interception + auth guard
-│       │   └── settings/
-│       │       ├── App.vue         # Settings root (provides DesktopShellKey, MainLayout)
-│       │       └── router.ts       # Settings routes (mirrors web's /settings/* paths)
+│       │   │   └── router.ts       # Chat routes + settings name stubs + /settings/* IPC interception + auth guard
+│       │   ├── settings/
+│       │   │   ├── App.vue         # Settings root (provides DesktopShellKey, MainLayout)
+│       │   │   └── router.ts       # Settings routes (built from shared spec; mirrors web's /settings/* paths)
+│       │   └── shared/
+│       │       └── settings-routes.ts  # Single source of truth for settings name+path+loader, consumed by both routers
 │       └── types/
 │           ├── web-stubs.d.ts      # Path-mapped stub for @memohai/web/* — see "Type Stubbing"
 │           └── ui-stubs.d.ts       # Path-mapped stub for @memohai/ui (Toaster, SidebarInset)
@@ -157,8 +159,9 @@ The preload bridge exposes a small, fixed surface to renderers via
 ```ts
 window.api = {
   window: {
-    openSettings(): Promise<void>   // ipc → main:'window:open-settings'
-    closeSelf(): Promise<void>      // ipc → main:'window:close-self'
+    openSettings(target?: string): Promise<void>          // ipc → main:'window:open-settings'
+    closeSelf(): Promise<void>                            // ipc → main:'window:close-self'
+    onSettingsNavigate(cb: (target: string) => void): void // settings-window subscription for IPC 'settings:navigate'
   },
 }
 ```
@@ -169,20 +172,42 @@ part of the security boundary.
 
 ### Cross-window navigation
 
-Settings actions invoked from the chat window's reused
-`@memohai/web/components/sidebar/...` (e.g. the gear footer link, the `+`
-button) are intercepted in the chat router's `beforeEach`:
+Settings actions invoked from the chat window's reused @memohai/web
+components — the gear footer link, the sidebar `+` button, the bot-item
+"Details" menu, the chat sidebar MCP/Schedule panels' `+` icons, the
+schedule/heartbeat trigger blocks, etc. — all eventually call either
+`router.push('/settings/...')` or `router.push({ name: 'bot-detail', ... })`.
+
+Both shapes are handled in the chat router. Name-based navigation works
+because the chat router registers no-op stub routes for every settings
+`name` from `shared/settings-routes.ts`. That lets vue-router resolve
+`{ name: 'bot-detail', params, query }` into a concrete `/settings/...`
+fullPath without warnings before the guard fires:
 
 ```ts
 if (to.path === '/settings' || to.path.startsWith('/settings/')) {
-  void window.api?.window?.openSettings()
+  void window.api?.window?.openSettings(to.fullPath)
   return false   // abort in-place navigation
 }
 ```
 
-This is why shared chat-sidebar components must navigate by **path** (e.g.
-`router.push('/settings/bots')`), never by `name` — `name: 'bots'` only
-exists in the settings router.
+The main process handler then:
+
+1. Creates the settings `BrowserWindow` if it doesn't exist, otherwise
+   restores/focuses the existing one (`focusWindow`).
+2. Sends `settings:navigate` with the requested path. If the renderer
+   isn't ready yet (cold start or in-flight reload), the target is
+   buffered in a Map keyed by webContents id and drained from the
+   per-window `did-finish-load` listener attached at creation time.
+
+The settings renderer subscribes via `onSettingsNavigate` before mount
+(in `src/renderer/src/settings.ts`) and pushes the path through its own
+router. A guard skips the push when the requested path equals the
+current `fullPath` so no spurious navigation is generated.
+
+When you add a new settings page in `@memohai/web`, also add an entry to
+`src/renderer/src/shared/settings-routes.ts`. Both routers consume it,
+so cross-window jumps stay correct without manual sync.
 
 ### Settings 401 handling
 
@@ -277,10 +302,16 @@ Both windows use `createMemoryHistory()` — the `file://` runtime makes
 | `/chat/:botId?/:sessionId?` | `chat` | `@memohai/web/pages/home/index.vue` |
 | `/login` | `Login` | `@memohai/web/pages/login/index.vue` |
 | `/oauth/mcp/callback` | `oauth-mcp-callback` | `@memohai/web/pages/oauth/mcp-callback.vue` |
+| `/settings/...` (every entry from `shared/settings-routes.ts`) | mirror of settings name | no-op stub component |
+
+The settings rows above are placeholders — the guard intercepts them
+before they ever render. They exist so that `router.push({ name: 'bots' })`
+and friends from reused @memohai/web components resolve to a concrete
+`/settings/...` fullPath that gets forwarded to the settings window.
 
 Three guards in `beforeEach`:
 
-1. `/settings*` → IPC `openSettings()` → return `false`.
+1. `/settings*` → IPC `openSettings(to.fullPath)` → return `false`.
 2. `/login` while already logged in → redirect to `/`.
 3. Any other route without `localStorage.token` → redirect to `Login`.
 
@@ -289,12 +320,14 @@ load failures (covers the case where the dev server restarts mid-session).
 
 ### Settings router (`src/renderer/src/settings/router.ts`)
 
-Mirrors the path layout under `/settings/*` from `@memohai/web/router` so
-the reused `SettingsSidebar`'s `route.path.startsWith('/settings/...')`
-active-state checks keep working. Route names mirror web exactly:
-`bots`, `bot-detail`, `providers`, `web-search`, `memory`, `speech`,
-`transcription`, `email`, `browser`, `usage`, `profile`, `platform`,
-`supermarket`, `about`. Default redirect: `/` → `/settings/bots`.
+Built from `shared/settings-routes.ts` (the same spec the chat router
+uses for its stubs). Path layout mirrors `@memohai/web/router`'s
+`/settings/*` children so the reused `SettingsSidebar`'s
+`route.path.startsWith('/settings/...')` active-state checks keep
+working. Route names mirror web exactly: `bots`, `bot-detail`,
+`providers`, `web-search`, `memory`, `speech`, `transcription`, `email`,
+`browser`, `usage`, `profile`, `platform`, `supermarket`, `about`.
+Default redirect: `/` → `/settings/bots`.
 
 The settings window has **no auth guard** — by design. If the chat window
 isn't authenticated yet, it owns login. Any 401 returned to a settings
