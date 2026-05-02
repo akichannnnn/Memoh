@@ -35,7 +35,10 @@ useSettingsStore()
       <template #sidebar>
         <!-- Desktop hosts settings in a dedicated window, so the sidebar's
              "← Settings" header (back-to-chat affordance) is suppressed. -->
-        <SettingsSidebar :hide-header="true" />
+        <SettingsSidebar
+          :hide-header="true"
+          :exclude-items="['profile']"
+        />
       </template>
       <template #main>
         <SidebarInset class="flex flex-col overflow-hidden">
