@@ -18,6 +18,7 @@ require (
 	github.com/containerd/go-cni v1.1.13
 	github.com/creack/pty v1.1.24
 	github.com/docker/docker v28.5.2+incompatible
+	github.com/docker/go-connections v0.6.0
 	github.com/emersion/go-imap/v2 v2.0.0-beta.8
 	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6
 	github.com/go-shiori/go-readability v0.0.0-20251205110129-5db1dc9836f0
@@ -35,7 +36,7 @@ require (
 	github.com/mailgun/mailgun-go/v5 v5.14.0
 	github.com/memohai/acgo v0.0.0-20260221232113-babac0d6acd7
 	github.com/memohai/dingtalk-stream-sdk-go v0.0.0-20260405113102-87e23096b978
-	github.com/memohai/twilight-ai v0.3.4-0.20260427134510-7fcc124cdebb
+	github.com/memohai/twilight-ai v0.4.0
 	github.com/modelcontextprotocol/go-sdk v1.5.0
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/opencontainers/runtime-spec v1.3.0
@@ -113,7 +114,6 @@ require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/distribution/reference v0.6.0 // indirect
 	github.com/dlclark/regexp2 v1.11.5 // indirect
-	github.com/docker/go-connections v0.6.0 // indirect
 	github.com/docker/go-units v0.5.0 // indirect
 	github.com/emersion/go-message v0.18.2 // indirect
 	github.com/emicklei/go-restful/v3 v3.13.0 // indirect
