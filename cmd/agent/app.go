@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -382,9 +383,28 @@ func provideChatResolver(log *slog.Logger, a *agentpkg.Agent, modelsService *mod
 	resolver.SetPipeline(pipeline)
 	resolver.SetBackgroundManager(bgManager)
 	resolver.SetToolApprovalService(toolApproval)
-	bgManager.SetWakeFunc(func(botID, sessionID string) {
-		resolver.TriggerBackgroundNotification(context.Background(), botID, sessionID)
-	})
+	if bgManager != nil {
+		bgManager.SetWakeFunc(func(botID, sessionID string) {
+			resolver.TriggerBackgroundNotification(context.Background(), botID, sessionID)
+		})
+		bgManager.SetEventFunc(func(evt background.TaskEvent) {
+			if eventHub == nil {
+				return
+			}
+			data, err := json.Marshal(map[string]any{
+				"event": evt.Event,
+				"task":  evt,
+			})
+			if err != nil {
+				return
+			}
+			eventHub.Publish(event.Event{
+				Type:  event.EventTypeBackgroundTask,
+				BotID: evt.BotID,
+				Data:  data,
+			})
+		})
+	}
 	return resolver
 }
 
@@ -602,10 +622,11 @@ func provideAuthHandler(log *slog.Logger, accountService *accounts.Service, rc *
 	return handlers.NewAuthHandler(log, accountService, rc.JwtSecret, rc.JwtExpiresIn)
 }
 
-func provideMessageHandler(log *slog.Logger, chatService *conversation.Service, msgService *message.DBService, mediaService *media.Service, botService *bots.Service, accountService *accounts.Service, hub *event.Hub, toolApproval *toolapproval.Service) *handlers.MessageHandler {
+func provideMessageHandler(log *slog.Logger, chatService *conversation.Service, msgService *message.DBService, mediaService *media.Service, botService *bots.Service, accountService *accounts.Service, hub *event.Hub, toolApproval *toolapproval.Service, bgManager *background.Manager) *handlers.MessageHandler {
 	h := handlers.NewMessageHandler(log, chatService, msgService, botService, accountService, hub)
 	h.SetMediaService(mediaService)
 	h.SetToolApprovalService(toolApproval)
+	h.SetBackgroundManager(bgManager)
 	return h
 }
 

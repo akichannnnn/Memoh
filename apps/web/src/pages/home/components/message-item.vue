@@ -62,9 +62,23 @@
         {{ message.senderDisplayName || senderFallbackName }}
       </p> -->
 
+      <!-- Background task status -->
+      <div
+        v-if="message.role === 'system' && message.kind === 'background_task'"
+        class="space-y-1"
+      >
+        <BackgroundTaskBlock :task="message.backgroundTask" />
+        <p
+          class="text-xs text-muted-foreground/80 mt-1"
+          :title="fullTimestamp"
+        >
+          {{ relativeTimestamp }}
+        </p>
+      </div>
+
       <!-- Heartbeat trigger (replaces user message) -->
       <div
-        v-if="message.role === 'user' && sessionType === 'heartbeat'"
+        v-else-if="message.role === 'user' && sessionType === 'heartbeat'"
         class="space-y-2"
       >
         <HeartbeatTriggerBlock
@@ -248,6 +262,7 @@ import { useSettingsStore } from '@/store/settings'
 import ThinkingBlock from './thinking-block.vue'
 import ToolCallBlock from './tool-call-block.vue'
 import AttachmentBlock from './attachment-block.vue'
+import BackgroundTaskBlock from './background-task-block.vue'
 import HeartbeatTriggerBlock from './heartbeat-trigger-block.vue'
 import ScheduleTriggerBlock from './schedule-trigger-block.vue'
 import ChannelBadge from '@/components/chat-list/channel-badge/index.vue'
