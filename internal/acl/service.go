@@ -415,9 +415,6 @@ func ruleFromListRow(row sqlc.ListBotACLRulesRow) Rule {
 		ChannelIdentityAvatarURL:    strings.TrimSpace(row.ChannelIdentityAvatarUrl.String),
 		SourceConversationName:      strings.TrimSpace(row.SourceConversationName),
 		SourceConversationAvatarURL: strings.TrimSpace(row.SourceConversationAvatarUrl),
-		LinkedUserUsername:          strings.TrimSpace(row.LinkedUserUsername.String),
-		LinkedUserDisplayName:       strings.TrimSpace(row.LinkedUserDisplayName.String),
-		LinkedUserAvatarURL:         strings.TrimSpace(row.LinkedUserAvatarUrl.String),
 		CreatedAt:                   timeFromPg(row.CreatedAt),
 		UpdatedAt:                   timeFromPg(row.UpdatedAt),
 	}
@@ -425,13 +422,10 @@ func ruleFromListRow(row sqlc.ListBotACLRulesRow) Rule {
 	if row.ChannelIdentityID.Valid {
 		rule.ChannelIdentityID = uuid.UUID(row.ChannelIdentityID.Bytes).String()
 	}
-	if row.LinkedUserID.Valid {
-		rule.LinkedUserID = uuid.UUID(row.LinkedUserID.Bytes).String()
-	}
 	return rule
 }
 
-func ruleFromWrite(row sqlc.BotAclRule) Rule {
+func ruleFromWrite(row sqlc.CreateBotACLRuleRow) Rule {
 	rule := Rule{
 		ID:                 uuid.UUID(row.ID.Bytes).String(),
 		BotID:              uuid.UUID(row.BotID.Bytes).String(),
@@ -450,7 +444,7 @@ func ruleFromWrite(row sqlc.BotAclRule) Rule {
 	return rule
 }
 
-func ruleFromUpdateRow(row sqlc.BotAclRule) Rule {
+func ruleFromUpdateRow(row sqlc.UpdateBotACLRuleRow) Rule {
 	rule := Rule{
 		ID:                 uuid.UUID(row.ID.Bytes).String(),
 		BotID:              uuid.UUID(row.BotID.Bytes).String(),
