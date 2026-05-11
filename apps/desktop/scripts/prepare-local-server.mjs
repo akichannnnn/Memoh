@@ -12,10 +12,12 @@ const cliDir = resolve(resourcesRoot, 'cli')
 const runtimeDir = resolve(resourcesRoot, 'runtime')
 const configDir = resolve(resourcesRoot, 'config')
 const providersDir = resolve(resourcesRoot, 'providers')
+const bundleTarget = process.env.MEMOH_DESKTOP_BUNDLE_TARGET || `${process.platform}-${process.arch}`
+const [bundlePlatform, bundleArch = process.arch] = bundleTarget.split('-')
+const goArch = bundleArch === 'x64' ? 'amd64' : bundleArch
 
-const serverName = process.platform === 'win32' ? 'memoh-server.exe' : 'memoh-server'
-const cliName = process.platform === 'win32' ? 'memoh.exe' : 'memoh'
-const dockerBridgeArch = process.arch === 'x64' ? 'amd64' : process.arch
+const serverName = bundlePlatform === 'win32' ? 'memoh-server.exe' : 'memoh-server'
+const cliName = bundlePlatform === 'win32' ? 'memoh.exe' : 'memoh'
 
 rmSync(serverDir, { recursive: true, force: true })
 rmSync(cliDir, { recursive: true, force: true })
@@ -30,6 +32,11 @@ mkdirSync(providersDir, { recursive: true })
 execFileSync('go', ['build', '-o', resolve(serverDir, serverName), './cmd/agent'], {
   cwd: repoRoot,
   stdio: 'inherit',
+  env: {
+    ...process.env,
+    GOOS: bundlePlatform === 'win32' ? 'windows' : bundlePlatform,
+    GOARCH: goArch,
+  },
 })
 
 // CLI binary ships next to the server inside the app bundle. CLI uses
@@ -38,6 +45,11 @@ execFileSync('go', ['build', '-o', resolve(serverDir, serverName), './cmd/agent'
 execFileSync('go', ['build', '-o', resolve(cliDir, cliName), './cmd/memoh'], {
   cwd: repoRoot,
   stdio: 'inherit',
+  env: {
+    ...process.env,
+    GOOS: bundlePlatform === 'win32' ? 'windows' : bundlePlatform,
+    GOARCH: goArch,
+  },
 })
 
 execFileSync('go', ['build', '-o', resolve(runtimeDir, 'bridge'), './cmd/bridge'], {
@@ -46,7 +58,7 @@ execFileSync('go', ['build', '-o', resolve(runtimeDir, 'bridge'), './cmd/bridge'
   env: {
     ...process.env,
     GOOS: 'linux',
-    GOARCH: dockerBridgeArch,
+    GOARCH: goArch,
   },
 })
 cpSync(resolve(repoRoot, 'cmd', 'bridge', 'template'), resolve(runtimeDir, 'templates'), { recursive: true })

@@ -57,7 +57,9 @@ function run(command, args, extraEnv = {}) {
 }
 
 run(process.execPath, ['scripts/prepare-qdrant.mjs', `--targets=${qdrantTarget}`])
-runPnpm(['run', 'prepare:local-server'])
+runPnpm(['run', 'prepare:local-server'], {
+  MEMOH_DESKTOP_BUNDLE_TARGET: qdrantTarget,
+})
 runPnpm(['exec', 'electron-vite', 'build'])
 runPnpm(['exec', 'electron-builder', ...builderArgs], {
   ...macToolchainEnv,
