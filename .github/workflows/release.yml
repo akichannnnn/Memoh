@@ -45,6 +45,7 @@ jobs:
     name: Publish npm packages
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    if: github.event_name == 'push'
     steps:
       - uses: actions/checkout@v4
       - name: Sync workspace versions
@@ -91,7 +92,7 @@ jobs:
   desktop-build:
     name: Build desktop (${{ matrix.platform }})
     runs-on: ${{ matrix.platform }}
-    timeout-minutes: 60
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -135,26 +136,27 @@ jobs:
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
       - name: Require macOS code signing secrets
-        if: ${{ matrix.platform == 'macos-latest' && (env.APPLE_CERTIFICATE == '' || env.APPLE_CERTIFICATE_PASSWORD == '') }}
+        if: ${{ startsWith(matrix.platform, 'macos-') }}
         shell: bash
         run: |
-          echo "APPLE_CERTIFICATE and APPLE_CERTIFICATE_PASSWORD are required for signed macOS desktop releases." >&2
-          exit 1
+          set -euo pipefail
+          missing=()
+          [[ -n "${APPLE_CERTIFICATE:-}" ]] || missing+=("APPLE_CERTIFICATE")
+          [[ -n "${APPLE_CERTIFICATE_PASSWORD:-}" ]] || missing+=("APPLE_CERTIFICATE_PASSWORD")
+
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing required macOS release secret(s):\n' >&2
+            printf '  - %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
       - name: Prepare macOS code signing
         id: mac-signing
-        if: ${{ matrix.platform == 'macos-latest' && env.APPLE_CERTIFICATE != '' && env.APPLE_CERTIFICATE_PASSWORD != '' }}
+        if: ${{ startsWith(matrix.platform, 'macos-') }}
         shell: bash
         run: |
           set -euo pipefail
           CSC_PATH="$RUNNER_TEMP/certificate.p12"
-          python3 - <<'EOF'
-          import base64
-          import os
-          from pathlib import Path
-
-          target = Path(os.environ["RUNNER_TEMP"]) / "certificate.p12"
-          target.write_bytes(base64.b64decode(os.environ["APPLE_CERTIFICATE"]))
-          EOF
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$CSC_PATH"
           echo "CSC_LINK=$CSC_PATH" >> "$GITHUB_ENV"
           echo "CSC_KEY_PASSWORD=$APPLE_CERTIFICATE_PASSWORD" >> "$GITHUB_ENV"
           echo "has_cert=true" >> "$GITHUB_OUTPUT"
@@ -164,18 +166,51 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: ${{ steps.mac-signing.outputs.has_cert == 'true' && 'true' || 'false' }}
         run: pnpm --filter @memohai/desktop ${{ matrix.build_cmd }}
-      - name: Verify macOS signature
-        if: ${{ matrix.platform == 'macos-latest' && steps.mac-signing.outputs.has_cert == 'true' }}
+      - name: Verify macOS bundles
+        if: ${{ startsWith(matrix.platform, 'macos-') && steps.mac-signing.outputs.has_cert == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
-          app_path="$(find apps/desktop/dist -name 'Memoh.app' -type d | head -n 1)"
-          if [[ -z "$app_path" ]]; then
-            echo "Memoh.app not found in apps/desktop/dist" >&2
+
+          declare -a bundles=(
+            "arm64:darwin-arm64:apps/desktop/dist/mac-arm64/Memoh.app"
+            "x64:darwin-x64:apps/desktop/dist/mac/Memoh.app"
+          )
+
+          for bundle in "${bundles[@]}"; do
+            IFS=: read -r arch qdrant_target app_path <<<"$bundle"
+
+            if [[ ! -d "$app_path" ]]; then
+              echo "Missing $arch app bundle: $app_path" >&2
+              exit 1
+            fi
+
+            qdrant_root="$app_path/Contents/Resources/qdrant"
+            qdrant_bin="$qdrant_root/$qdrant_target/qdrant"
+            if [[ ! -x "$qdrant_bin" ]]; then
+              echo "Missing $arch qdrant binary: $qdrant_bin" >&2
+              find "$qdrant_root" -maxdepth 3 -type f -print || true
+              exit 1
+            fi
+
+            extra_qdrant_dirs="$(find "$qdrant_root" -mindepth 1 -maxdepth 1 -type d ! -name "$qdrant_target" -print -quit)"
+            if [[ -n "$extra_qdrant_dirs" ]]; then
+              echo "Unexpected qdrant resource in $arch app: $extra_qdrant_dirs" >&2
+              find "$qdrant_root" -mindepth 1 -maxdepth 1 -type d -print
+              exit 1
+            fi
+
+            codesign --verify --deep --strict --verbose=2 "$app_path"
+            codesign -dv --verbose=4 "$app_path" 2>&1 | grep -F "Developer ID Application"
+          done
+
+          shopt -s nullglob
+          dmg_artifacts=(apps/desktop/dist/Memoh-Desktop-*-mac-arm64.dmg apps/desktop/dist/Memoh-Desktop-*-mac-x64.dmg)
+          if (( ${#dmg_artifacts[@]} != 2 )); then
+            echo "Expected mac arm64/x64 dmg artifacts." >&2
+            ls -lh apps/desktop/dist || true
             exit 1
           fi
-          codesign --verify --deep --strict --verbose=2 "$app_path"
-          codesign -dv --verbose=4 "$app_path" 2>&1 | grep -F "Developer ID Application"
       - name: Upload desktop artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -185,7 +220,6 @@ jobs:
             apps/desktop/dist/*.deb
             apps/desktop/dist/*.rpm
             apps/desktop/dist/*.dmg
-            apps/desktop/dist/*.zip
             apps/desktop/dist/*.exe
           if-no-files-found: error
 
@@ -215,7 +249,6 @@ jobs:
             release-artifacts/desktop/*.deb
             release-artifacts/desktop/*.rpm
             release-artifacts/desktop/*.dmg
-            release-artifacts/desktop/*.zip
             release-artifacts/desktop/*.exe
           )
           if [[ ${#files[@]} -eq 0 ]]; then

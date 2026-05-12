@@ -68,19 +68,12 @@ jobs:
 
       - name: Prepare macOS code signing
         id: mac-signing
-        if: ${{ matrix.platform == 'macos-latest' && github.event_name != 'pull_request' && env.APPLE_CERTIFICATE != '' && env.APPLE_CERTIFICATE_PASSWORD != '' }}
+        if: ${{ startsWith(matrix.platform, 'macos-') && github.event_name != 'pull_request' && env.APPLE_CERTIFICATE != '' && env.APPLE_CERTIFICATE_PASSWORD != '' }}
         shell: bash
         run: |
           set -euo pipefail
           CSC_PATH="$RUNNER_TEMP/certificate.p12"
-          python3 - <<'EOF'
-          import base64
-          import os
-          from pathlib import Path
-
-          target = Path(os.environ["RUNNER_TEMP"]) / "certificate.p12"
-          target.write_bytes(base64.b64decode(os.environ["APPLE_CERTIFICATE"]))
-          EOF
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$CSC_PATH"
           echo "CSC_LINK=$CSC_PATH" >> "$GITHUB_ENV"
           echo "CSC_KEY_PASSWORD=$APPLE_CERTIFICATE_PASSWORD" >> "$GITHUB_ENV"
           echo "has_cert=true" >> "$GITHUB_OUTPUT"
@@ -91,7 +84,7 @@ jobs:
         run: pnpm --filter @memohai/desktop build:dir
 
       - name: Verify macOS signature
-        if: ${{ matrix.platform == 'macos-latest' && steps.mac-signing.outputs.has_cert == 'true' }}
+        if: ${{ startsWith(matrix.platform, 'macos-') && steps.mac-signing.outputs.has_cert == 'true' }}
         shell: bash
         run: |
           set -euo pipefail

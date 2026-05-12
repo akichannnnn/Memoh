@@ -39,10 +39,7 @@ extraResources:
 mac:
   category: public.app-category.productivity
   target:
-    - target: dmg
-      arch: [arm64, x64]
-    - target: zip
-      arch: [arm64, x64]
+    - dmg
   icon: build/icon.icon
   artifactName: ${productName}-Desktop-${version}-mac-${arch}.${ext}
   notarize: false
