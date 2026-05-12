@@ -42,9 +42,10 @@ mac:
     - dmg
   icon: build/icon.icon
   artifactName: ${productName}-Desktop-${version}-mac-${arch}.${ext}
-  notarize: false
+  notarize: true
 dmg:
   icon: build/icon.icns
+  sign: true
 linux:
   category: Utility
   target:

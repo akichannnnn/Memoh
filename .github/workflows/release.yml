@@ -106,6 +106,9 @@ jobs:
     env:
       APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
       APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
     steps:
       - uses: actions/checkout@v4
       - name: Sync desktop version
@@ -135,7 +138,7 @@ jobs:
           cache: true
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
-      - name: Require macOS code signing secrets
+      - name: Require macOS signing and notarization secrets
         if: ${{ startsWith(matrix.platform, 'macos-') }}
         shell: bash
         run: |
@@ -143,13 +146,16 @@ jobs:
           missing=()
           [[ -n "${APPLE_CERTIFICATE:-}" ]] || missing+=("APPLE_CERTIFICATE")
           [[ -n "${APPLE_CERTIFICATE_PASSWORD:-}" ]] || missing+=("APPLE_CERTIFICATE_PASSWORD")
+          [[ -n "${APPLE_API_KEY:-}" ]] || missing+=("APPLE_API_KEY")
+          [[ -n "${APPLE_API_KEY_ID:-}" ]] || missing+=("APPLE_API_KEY_ID")
+          [[ -n "${APPLE_API_ISSUER:-}" ]] || missing+=("APPLE_API_ISSUER")
 
           if (( ${#missing[@]} > 0 )); then
             printf 'Missing required macOS release secret(s):\n' >&2
             printf '  - %s\n' "${missing[@]}" >&2
             exit 1
           fi
-      - name: Prepare macOS code signing
+      - name: Prepare macOS signing and notarization
         id: mac-signing
         if: ${{ startsWith(matrix.platform, 'macos-') }}
         shell: bash
@@ -159,6 +165,10 @@ jobs:
           printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$CSC_PATH"
           echo "CSC_LINK=$CSC_PATH" >> "$GITHUB_ENV"
           echo "CSC_KEY_PASSWORD=$APPLE_CERTIFICATE_PASSWORD" >> "$GITHUB_ENV"
+          API_KEY_PATH="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          printf '%b' "$APPLE_API_KEY" | tr -d '\r' > "$API_KEY_PATH"
+          chmod 600 "$API_KEY_PATH"
+          echo "APPLE_API_KEY=$API_KEY_PATH" >> "$GITHUB_ENV"
           echo "has_cert=true" >> "$GITHUB_OUTPUT"
       - name: Build desktop bundles
         shell: bash
@@ -166,6 +176,28 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_IDENTITY_AUTO_DISCOVERY: ${{ steps.mac-signing.outputs.has_cert == 'true' && 'true' || 'false' }}
         run: pnpm --filter @memohai/desktop ${{ matrix.build_cmd }}
+      - name: Notarize macOS DMGs
+        if: ${{ startsWith(matrix.platform, 'macos-') && steps.mac-signing.outputs.has_cert == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          shopt -s nullglob
+          dmg_artifacts=(apps/desktop/dist/Memoh-Desktop-*-mac-arm64.dmg apps/desktop/dist/Memoh-Desktop-*-mac-x64.dmg)
+          if (( ${#dmg_artifacts[@]} != 2 )); then
+            echo "Expected mac arm64/x64 dmg artifacts." >&2
+            ls -lh apps/desktop/dist || true
+            exit 1
+          fi
+
+          for dmg in "${dmg_artifacts[@]}"; do
+            xcrun notarytool submit "$dmg" \
+              --key "$APPLE_API_KEY" \
+              --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_ISSUER" \
+              --wait
+            xcrun stapler staple "$dmg"
+          done
       - name: Verify macOS bundles
         if: ${{ startsWith(matrix.platform, 'macos-') && steps.mac-signing.outputs.has_cert == 'true' }}
         shell: bash
@@ -202,6 +234,7 @@ jobs:
 
             codesign --verify --deep --strict --verbose=2 "$app_path"
             codesign -dv --verbose=4 "$app_path" 2>&1 | grep -F "Developer ID Application"
+            spctl --assess --type execute --verbose=4 "$app_path"
           done
 
           shopt -s nullglob
@@ -211,6 +244,12 @@ jobs:
             ls -lh apps/desktop/dist || true
             exit 1
           fi
+
+          for dmg in "${dmg_artifacts[@]}"; do
+            codesign --verify --verbose=2 "$dmg"
+            xcrun stapler validate "$dmg"
+            spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
+          done
       - name: Upload desktop artifacts
         uses: actions/upload-artifact@v4
         with:
