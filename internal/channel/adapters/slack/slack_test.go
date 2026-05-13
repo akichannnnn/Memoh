@@ -148,6 +148,7 @@ func TestBuildSlackReplyRefFromThread(t *testing.T) {
 	ref := buildSlackReplyRef("C123", "1710000001.000000", "1710000000.000000", "U123")
 	if ref == nil {
 		t.Fatal("expected reply ref")
+		return
 	}
 	if ref.Target != "C123" || ref.MessageID != "1710000000.000000" || ref.Sender != "U123" {
 		t.Fatalf("unexpected reply ref: %#v", ref)

@@ -188,6 +188,7 @@ func TestBuildTelegramForwardRefFromChannel(t *testing.T) {
 	})
 	if ref == nil {
 		t.Fatal("expected forward ref")
+		return
 	}
 	if ref.MessageID != "99" || ref.FromConversationID != "-10001" {
 		t.Fatalf("unexpected forward ids: %+v", ref)
