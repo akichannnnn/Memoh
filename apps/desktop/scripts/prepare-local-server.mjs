@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { cpSync, copyFileSync, mkdirSync, rmSync } from 'node:fs'
+import { cpSync, copyFileSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -18,9 +18,31 @@ const goArch = bundleArch === 'x64' ? 'amd64' : bundleArch
 
 const serverName = bundlePlatform === 'win32' ? 'memoh-server.exe' : 'memoh-server'
 const cliName = bundlePlatform === 'win32' ? 'memoh.exe' : 'memoh'
-const goBuildFlags = process.env.MEMOH_DESKTOP_KEEP_GO_SYMBOLS
-  ? ['build', '-trimpath']
-  : ['build', '-trimpath', '-ldflags=-s -w']
+const desktopPackage = JSON.parse(readFileSync(resolve(desktopRoot, 'package.json'), 'utf8'))
+const versionPackage = 'github.com/memohai/memoh/internal/version'
+const buildVersion = process.env.MEMOH_DESKTOP_VERSION || process.env.VERSION || desktopPackage.version || 'dev'
+const buildCommitHash = process.env.MEMOH_DESKTOP_COMMIT_HASH || process.env.COMMIT_HASH || gitOutput(['rev-parse', 'HEAD'])
+const buildTime = process.env.MEMOH_DESKTOP_BUILD_TIME || process.env.BUILD_TIME || new Date().toISOString()
+
+function gitOutput(args) {
+  try {
+    return execFileSync('git', args, { cwd: repoRoot, encoding: 'utf8' }).trim()
+  } catch {
+    return ''
+  }
+}
+
+function buildLdflags() {
+  const flags = process.env.MEMOH_DESKTOP_KEEP_GO_SYMBOLS ? [] : ['-s', '-w']
+  flags.push(
+    '-X', `${versionPackage}.Version=${buildVersion}`,
+    '-X', `${versionPackage}.CommitHash=${buildCommitHash}`,
+    '-X', `${versionPackage}.BuildTime=${buildTime}`,
+  )
+  return flags.join(' ')
+}
+
+const goBuildFlags = ['build', '-trimpath', '-ldflags', buildLdflags()]
 
 function goBuild(outputPath, packagePath, env) {
   execFileSync('go', [...goBuildFlags, '-o', outputPath, packagePath], {
