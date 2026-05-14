@@ -32,12 +32,12 @@
 
 Memoh is distributed in two forms:
 
-### Deploy Version
+### ⚙️ Deploy Version
 
 The self-hosted server stack for always-on, multi-user or multi-tenant usage. Use this when you want Memoh running on a server, VM, NAS, or Kubernetes cluster, with bots available through Web UI and external channels such as Telegram, Discord, Lark, WeChat, Email, and more.
 
 <details>
-<summary><strong>Deploy Memoh Server</strong></summary>
+<summary><strong>🐳 Deploy Memoh Server</strong></summary>
 
 Use the deploy version when Memoh should be reachable by multiple users, run bots continuously, or connect to public/private messaging channels. The default Docker deployment starts the server, Web UI, database migrations, container runtime support, and the services needed for workspace containers.
 
@@ -85,12 +85,12 @@ See [DEPLOYMENT.md](DEPLOYMENT.md) for custom configuration and production setup
 
 </details>
 
-### Desktop Version
+### 🖥️ Desktop Version
 
 The native client for personal/local use. It starts and manages a local Memoh server on your computer, bundles the CLI and local runtime resources, and is the easiest way to try Memoh without maintaining a separate server deployment.
 
 <details>
-<summary><strong>Install Memoh Desktop</strong></summary>
+<summary><strong>⏬ Install Memoh Desktop</strong></summary>
 
 Use the desktop version when you want a local app that manages Memoh for you. It is designed for single-user desktop workflows, local memory, and local/Docker-backed workspaces. The desktop app runs its own local server, so it is separate from the deploy version above.
 

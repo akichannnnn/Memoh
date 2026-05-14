@@ -32,12 +32,12 @@
 
 Memoh 提供两种形态：
 
-### Deploy Version
+### ⚙️ Deploy Version
 
 面向长期在线、多人或多租户使用的自托管服务端栈。适合把 Memoh 跑在服务器、VM、NAS 或 Kubernetes 集群上，让机器人通过 Web UI 以及 Telegram、Discord、飞书、微信、邮件等外部渠道持续可用。
 
 <details>
-<summary><strong>部署 Memoh Server</strong></summary>
+<summary><strong>🐳 部署 Memoh Server</strong></summary>
 
 当 Memoh 需要被多人访问、机器人需要持续运行，或需要接入公开/私有消息渠道时，请使用 deploy 版本。默认 Docker 部署会启动 server、Web UI、数据库迁移、容器运行时支持，以及 workspace 容器所需的配套服务。
 
@@ -83,12 +83,12 @@ kubectl apply -k deploy/kubernetes
 
 </details>
 
-### Desktop Version
+### 🖥️ Desktop Version
 
 面向个人/本地使用的原生客户端。它会在你的电脑上启动并管理本地 Memoh server，打包 CLI 和本地 runtime 资源，是不维护单独服务端部署也能快速试用 Memoh 的最简单方式。
 
 <details>
-<summary><strong>安装 Memoh Desktop</strong></summary>
+<summary><strong>⏬ 安装 Memoh Desktop</strong></summary>
 
 当你希望有一个本地 App 代管 Memoh 时，请使用 desktop 版本。它面向单用户桌面工作流、本地记忆，以及 local/Docker-backed workspace。桌面端会运行自己的本地 server，因此和上面的 deploy 版本是两条不同形态。
 
