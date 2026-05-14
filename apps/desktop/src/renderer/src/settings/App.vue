@@ -97,7 +97,7 @@ const breadcrumbs = computed(() => {
           <!-- Universal Settings Breadcrumb per Figma 5:937 & 5:807 -->
           <header
             v-if="breadcrumbs.length > 0"
-            class="h-10 flex items-center px-6 shrink-0 border-b border-border/40"
+            class="h-10 flex items-center px-6 shrink-0 border-b border-border/40 [-webkit-app-region:drag]"
           >
             <Breadcrumb class="w-full">
               <BreadcrumbList class="gap-1.5 flex-nowrap">
@@ -111,7 +111,7 @@ const breadcrumbs = computed(() => {
                   >
                     <BreadcrumbLink
                       as-child
-                      class="text-muted-foreground hover:text-foreground transition-colors"
+                      class="text-muted-foreground hover:text-foreground transition-colors [-webkit-app-region:no-drag]"
                     >
                       <router-link :to="item.to">
                         <span class="text-[11px] font-medium leading-none">{{ item.label }}</span>
@@ -137,7 +137,7 @@ const breadcrumbs = computed(() => {
             </Breadcrumb>
           </header>
 
-          <section class="flex-1 relative min-h-0">
+          <section class="flex-1 relative min-h-0 overflow-y-auto">
             <router-view v-slot="{ Component }">
               <KeepAlive>
                 <component :is="Component" />
